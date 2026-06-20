@@ -84,6 +84,7 @@ fn parse_hashmap(data: &[u8], opts: &DeserializeOptions, n: usize) -> Vec<Vec<Fo
 
 // ---- variant 3: chunk-parallel into Vec<(&str, Val)>, borrowed ----
 
+#[allow(dead_code)] // fields exist to mirror real parse work; values are discarded
 enum Val<'a> {
     Int(i64),
     Float(f64),

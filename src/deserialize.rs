@@ -44,22 +44,35 @@ pub fn deserialize_dump_from_bytes(
     _max_threads: i32,
     opts: &DeserializeOptions,
 ) -> Result<FonDump, FonError> {
-    let lines = split_lines(content);
-    let collections: Vec<Result<FonCollection, FonError>> = lines
+    // Strip a UTF-8 BOM once so it never glues onto the first key.
+    let content = if content.len() >= 3
+        && content[0] == 0xEF
+        && content[1] == 0xBB
+        && content[2] == 0xBF
+    {
+        &content[3..]
+    } else {
+        content
+    };
+    if content.is_empty() {
+        return Ok(FonDump::new());
+    }
+
+    // Split into newline-aligned byte ranges (one per worker) and parse each
+    // chunk in parallel — no single-threaded whole-file line scan.
+    let workers = rayon::current_num_threads().max(1);
+    let bounds = chunk_bounds(content, workers);
+    let parts: Vec<Result<Vec<FonCollection>, FonError>> = bounds
         .par_iter()
-        .map(|line| {
-            if line.is_empty() {
-                Ok(FonCollection::new())
-            } else {
-                deserialize_line(line, opts)
-            }
-        })
+        .map(|&(start, end)| parse_chunk(&content[start..end], opts))
         .collect();
-    let mut dump = FonDump::with_capacity(lines.len());
-    for (i, c) in collections.into_iter().enumerate() {
-        let c = c?;
-        if !c.is_empty() {
-            dump.add(i as u64, c);
+
+    let mut dump = FonDump::with_capacity(content.len() / 64);
+    let mut key = 0u64;
+    for part in parts {
+        for collection in part? {
+            dump.add(key, collection);
+            key += 1;
         }
     }
     Ok(dump)
@@ -71,33 +84,66 @@ pub fn deserialize_line(line: &[u8], opts: &DeserializeOptions) -> Result<FonCol
 }
 
 
-fn split_lines(content: &[u8]) -> Vec<&[u8]> {
-    let mut lines: Vec<&[u8]> = Vec::with_capacity((content.len() / 1000).max(1));
-    let mut start = 0;
-
-    // Skip UTF-8 BOM (EF BB BF) so it doesn't get glued onto the first key.
-    if content.len() >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF {
-        start = 3;
+// Cut `content` into `n` newline-aligned byte ranges: each range begins right
+// after a '\n' (or at 0) and ends right after a '\n' (or at EOF), so no record
+// is ever split across two ranges.
+fn chunk_bounds(content: &[u8], n: usize) -> Vec<(usize, usize)> {
+    let len = content.len();
+    if len == 0 || n <= 1 {
+        return vec![(0, len)];
     }
 
-    let mut i = start;
-    while i < content.len() {
-        let c = content[i];
+    let mut points = Vec::with_capacity(n + 1);
+    points.push(0usize);
+    for i in 1..n {
+        let approx = (len * i / n).min(len);
+        let next = content[approx..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| approx + p + 1)
+            .unwrap_or(len);
+        if *points.last().unwrap() < next {
+            points.push(next);
+        }
+    }
+    if *points.last().unwrap() != len {
+        points.push(len);
+    }
+    points.windows(2).map(|w| (w[0], w[1])).collect()
+}
+
+
+// Parse every non-empty line in one newline-aligned chunk. Mirrors the old
+// single-threaded splitter: '\n', '\r', and '\r\n' all terminate a line, empty
+// lines and empty-parsed collections are dropped.
+fn parse_chunk(chunk: &[u8], opts: &DeserializeOptions) -> Result<Vec<FonCollection>, FonError> {
+    let mut out = Vec::new();
+    let len = chunk.len();
+    let mut start = 0;
+    let mut i = 0;
+    while i < len {
+        let c = chunk[i];
         if c == b'\n' || c == b'\r' {
             if i > start {
-                lines.push(&content[start..i]);
+                let coll = deserialize_line(&chunk[start..i], opts)?;
+                if !coll.is_empty() {
+                    out.push(coll);
+                }
             }
-            if c == b'\r' && i + 1 < content.len() && content[i + 1] == b'\n' {
+            if c == b'\r' && i + 1 < len && chunk[i + 1] == b'\n' {
                 i += 1;
             }
             start = i + 1;
         }
         i += 1;
     }
-    if start < content.len() {
-        lines.push(&content[start..]);
+    if start < len {
+        let coll = deserialize_line(&chunk[start..], opts)?;
+        if !coll.is_empty() {
+            out.push(coll);
+        }
     }
-    lines
+    Ok(out)
 }
 
 
