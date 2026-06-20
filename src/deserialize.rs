@@ -4,6 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use memchr::{memchr, memchr2};
 use rayon::prelude::*;
 
 use crate::error::FonError;
@@ -60,10 +61,14 @@ pub fn deserialize_dump_from_bytes(
         return Ok(FonDump::new());
     }
 
-    // Split into newline-aligned byte ranges (one per worker) and parse each
-    // chunk in parallel — no single-threaded whole-file line scan.
+    // Split into newline-aligned byte ranges and parse them in parallel — no
+    // single-threaded whole-file line scan. Aim for ~1 MB chunks: small enough
+    // to stay cache-resident and to give Rayon plenty of work items to balance
+    // uneven records across cores, but never fewer than the thread count.
+    const TARGET_CHUNK: usize = 1 << 20;
     let workers = rayon::current_num_threads().max(1);
-    let bounds = chunk_bounds(content, workers);
+    let chunk_count = (content.len() / TARGET_CHUNK).max(workers);
+    let bounds = chunk_bounds(content, chunk_count);
     let parts: Vec<Result<Vec<FonCollection>, FonError>> = bounds
         .par_iter()
         .map(|&(start, end)| parse_chunk(&content[start..end], opts))
@@ -122,27 +127,30 @@ fn parse_chunk(chunk: &[u8], opts: &DeserializeOptions) -> Result<Vec<FonCollect
     let mut interner = KeyInterner::new();
     let len = chunk.len();
     let mut start = 0;
-    let mut i = 0;
-    while i < len {
-        let c = chunk[i];
-        if c == b'\n' || c == b'\r' {
-            if i > start {
-                let coll = parse_collection_body(&chunk[start..i], 0, opts, &mut interner)?;
+    // SIMD-scan to the next line terminator instead of inspecting every byte.
+    while start < len {
+        match memchr2(b'\n', b'\r', &chunk[start..]) {
+            Some(rel) => {
+                let nl = start + rel;
+                if nl > start {
+                    let coll = parse_collection_body(&chunk[start..nl], 0, opts, &mut interner)?;
+                    if !coll.is_empty() {
+                        out.push(coll);
+                    }
+                }
+                start = if chunk[nl] == b'\r' && nl + 1 < len && chunk[nl + 1] == b'\n' {
+                    nl + 2
+                } else {
+                    nl + 1
+                };
+            }
+            None => {
+                let coll = parse_collection_body(&chunk[start..], 0, opts, &mut interner)?;
                 if !coll.is_empty() {
                     out.push(coll);
                 }
+                break;
             }
-            if c == b'\r' && i + 1 < len && chunk[i + 1] == b'\n' {
-                i += 1;
-            }
-            start = i + 1;
-        }
-        i += 1;
-    }
-    if start < len {
-        let coll = parse_collection_body(&chunk[start..], 0, opts, &mut interner)?;
-        if !coll.is_empty() {
-            out.push(coll);
         }
     }
     Ok(out)
@@ -506,5 +514,5 @@ fn parse_object_array<'a>(
 
 
 fn find_byte(data: &[u8], target: u8) -> Option<usize> {
-    data.iter().position(|&b| b == target)
+    memchr(target, data)
 }
