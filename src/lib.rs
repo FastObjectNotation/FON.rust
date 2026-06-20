@@ -1,6 +1,7 @@
-//! FON (Fast Object Notation) — high-performance serialization core.
+//! FON (Fast Object Notation) — a fast, human-readable, line-oriented serialization format.
 //!
-//! Types, serialization, and deserialization for the FON wire format.
+//! Each line is one record: a comma-separated list of `key=type:value` pairs. This crate
+//! provides types, serialization, and deserialization for the FON wire format.
 
 pub mod deserialize;
 pub mod error;

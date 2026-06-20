@@ -54,7 +54,13 @@ Strings are double-quoted with `\n \r \t \b \f \" \\` escapes.
 
 ```toml
 [dependencies]
-fon = { git = "https://github.com/FastObjectNotation/FON.rust" }
+FastObjectNotation = "0.3.0"
+```
+
+Or with cargo:
+
+```bash
+cargo add FastObjectNotation
 ```
 
 ## Usage

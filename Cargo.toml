@@ -2,7 +2,7 @@
 name = "FastObjectNotation"
 version = "0.3.0"
 edition = "2021"
-description = "Fast Object Notation - high-performance serialization core"
+description = "Fast Object Notation — a fast, human-readable, line-oriented serialization format"
 license = "MIT"
 repository = "https://github.com/FastObjectNotation/FON.rust"
 
