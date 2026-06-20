@@ -65,9 +65,11 @@ impl FonValue {
 }
 
 
+// Records have a handful of fields, so a flat Vec beats a per-record HashMap:
+// far fewer allocations on the parse hot path, and `get` is a short linear scan.
 #[derive(Default)]
 pub struct FonCollection {
-    data: HashMap<String, FonValue>,
+    data: Vec<(String, FonValue)>,
 }
 
 
@@ -78,17 +80,17 @@ impl FonCollection {
 
 
     pub fn add(&mut self, key: String, value: FonValue) {
-        self.data.insert(key, value);
+        self.data.push((key, value));
     }
 
 
     pub fn get(&self, key: &str) -> Option<&FonValue> {
-        self.data.get(key)
+        self.data.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut FonValue> {
-        self.data.get_mut(key)
+        self.data.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
 
@@ -102,8 +104,8 @@ impl FonCollection {
     }
 
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, String, FonValue> {
-        self.data.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &FonValue)> {
+        self.data.iter().map(|(k, v)| (k, v))
     }
 }
 
