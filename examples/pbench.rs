@@ -27,7 +27,7 @@ fn make_dump(n: u64) -> FonDump {
         c.add("id".into(), FonValue::ULong(i));
         c.add("name".into(), FonValue::String(format!("record number {i}")));
         c.add("price".into(), FonValue::Double(i as f64 * 1.5));
-        c.add("active".into(), FonValue::Bool(i % 2 == 0));
+        c.add("active".into(), FonValue::Bool(i.is_multiple_of(2)));
         c.add("tags".into(), FonValue::IntArray(vec![1, 2, 3, 4, 5]));
         d.add(i, c);
     }

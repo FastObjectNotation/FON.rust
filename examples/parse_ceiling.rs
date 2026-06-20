@@ -6,6 +6,7 @@
 //!   1. current  — fon::deserialize_dump_from_bytes (HashMap + String, lib).
 //!   2. chunk HashMap — chunk-aligned parallel parse into FonCollection (HashMap).
 //!   3. chunk borrowed — chunk-aligned parallel parse into Vec<(&str, Val)>.
+//!
 //! Global allocator = mimalloc (cheap baseline, per the research).
 //!
 //! Usage: `cargo run --release --example parse_ceiling -- [size_mb]`  (default 1024)
@@ -31,7 +32,7 @@ fn make_dump(n: u64) -> FonDump {
         c.add("id".into(), FonValue::ULong(i));
         c.add("name".into(), FonValue::String(format!("record number {i}")));
         c.add("price".into(), FonValue::Double(i as f64 * 1.5));
-        c.add("active".into(), FonValue::Bool(i % 2 == 0));
+        c.add("active".into(), FonValue::Bool(i.is_multiple_of(2)));
         c.add("tags".into(), FonValue::IntArray(vec![1, 2, 3, 4, 5]));
         d.add(i, c);
     }
