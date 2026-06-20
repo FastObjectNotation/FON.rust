@@ -15,6 +15,7 @@ rayon = "1"
 
 [dev-dependencies]
 criterion = "0.5"
+mimalloc = "0.1"
 
 [[bench]]
 name = "fon_bench"
