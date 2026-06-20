@@ -1,5 +1,5 @@
 [package]
-name = "FON_rust"
+name = "FastObjectNotation"
 version = "0.3.0"
 edition = "2021"
 description = "Fast Object Notation - high-performance serialization core"
