@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 rayon = "1"
 memchr = "2"
+atoi = "2"
 
 [dev-dependencies]
 criterion = "0.5"

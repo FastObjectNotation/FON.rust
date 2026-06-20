@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use memchr::{memchr, memchr2};
@@ -293,21 +292,21 @@ fn parse_value<'a>(
     }
 
     let end = find_value_end(data);
-    let value_str = as_str(&data[..end]);
+    let num = &data[..end];
     let mut consumed = end;
     if consumed < data.len() && data[consumed] == b',' {
         consumed += 1;
     }
 
     let value = match type_char {
-        TYPE_BYTE => FonValue::Byte(parse_num::<u8>(value_str)?),
-        TYPE_SHORT => FonValue::Short(parse_num::<i16>(value_str)?),
-        TYPE_INT => FonValue::Int(parse_num::<i32>(value_str)?),
-        TYPE_UINT => FonValue::UInt(parse_num::<u32>(value_str)?),
-        TYPE_LONG => FonValue::Long(parse_num::<i64>(value_str)?),
-        TYPE_ULONG => FonValue::ULong(parse_num::<u64>(value_str)?),
-        TYPE_FLOAT => FonValue::Float(parse_num::<f32>(value_str)?),
-        TYPE_DOUBLE => FonValue::Double(parse_num::<f64>(value_str)?),
+        TYPE_BYTE => FonValue::Byte(parse_num::<u8>(num)?),
+        TYPE_SHORT => FonValue::Short(parse_num::<i16>(num)?),
+        TYPE_INT => FonValue::Int(parse_num::<i32>(num)?),
+        TYPE_UINT => FonValue::UInt(parse_num::<u32>(num)?),
+        TYPE_LONG => FonValue::Long(parse_num::<i64>(num)?),
+        TYPE_ULONG => FonValue::ULong(parse_num::<u64>(num)?),
+        TYPE_FLOAT => FonValue::Float(parse_num::<f32>(num)?),
+        TYPE_DOUBLE => FonValue::Double(parse_num::<f64>(num)?),
         TYPE_BOOL => FonValue::Bool(data[0] != b'0'),
         _ => return Err(FonError::Parse("Unknown type".into())),
     };
@@ -316,13 +315,56 @@ fn parse_value<'a>(
 }
 
 
-fn parse_num<T: FromStr>(s: &str) -> Result<T, FonError> {
-    s.parse::<T>()
-        .map_err(|_| FonError::Parse(format!("Failed to parse number: '{}'", s)))
+fn parse_num<T: NumParse>(bytes: &[u8]) -> Result<T, FonError> {
+    T::parse_field(bytes)
 }
 
 
-fn parse_number_array<T: FromStr>(data: &[u8]) -> Result<(Vec<T>, usize), FonError> {
+// Numeric field parsing. Integers use a tight checked digit loop (faster than the
+// standard library's generic `FromStr`); floats defer to the standard library,
+// which already parses with the fast Eisel-Lemire algorithm.
+trait NumParse: Sized {
+    fn parse_field(bytes: &[u8]) -> Result<Self, FonError>;
+}
+
+
+fn num_err(bytes: &[u8]) -> FonError {
+    FonError::Parse(format!(
+        "Failed to parse number: '{}'",
+        String::from_utf8_lossy(bytes)
+    ))
+}
+
+
+macro_rules! impl_num_parse_int {
+    ($($t:ty),+) => {$(
+        impl NumParse for $t {
+            #[inline]
+            fn parse_field(bytes: &[u8]) -> Result<Self, FonError> {
+                atoi::atoi::<$t>(bytes).ok_or_else(|| num_err(bytes))
+            }
+        }
+    )+};
+}
+
+
+macro_rules! impl_num_parse_float {
+    ($($t:ty),+) => {$(
+        impl NumParse for $t {
+            #[inline]
+            fn parse_field(bytes: &[u8]) -> Result<Self, FonError> {
+                as_str(bytes).parse::<$t>().map_err(|_| num_err(bytes))
+            }
+        }
+    )+};
+}
+
+
+impl_num_parse_int!(u8, u32, u64, i16, i32, i64);
+impl_num_parse_float!(f32, f64);
+
+
+fn parse_number_array<T: NumParse>(data: &[u8]) -> Result<(Vec<T>, usize), FonError> {
     if data[0] != b'[' {
         return Err(FonError::Parse("Array must start with '['".into()));
     }
@@ -335,8 +377,7 @@ fn parse_number_array<T: FromStr>(data: &[u8]) -> Result<(Vec<T>, usize), FonErr
     while pos < content.len() {
         let remaining = &content[pos..];
         let end = find_value_end(remaining);
-        let s = as_str(&remaining[..end]);
-        result.push(parse_num::<T>(s)?);
+        result.push(parse_num::<T>(&remaining[..end])?);
         pos += end;
         if pos < content.len() && content[pos] == b',' {
             pos += 1;
@@ -358,17 +399,22 @@ fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
     }
 
     let mut end_quote = 1;
+    let mut has_escape = false;
     while end_quote < data.len() {
-        if data[end_quote] == b'"' && data[end_quote - 1] != b'\\' {
+        let b = data[end_quote];
+        if b == b'"' && data[end_quote - 1] != b'\\' {
             break;
+        }
+        if b == b'\\' {
+            has_escape = true;
         }
         end_quote += 1;
     }
 
     let content = &data[1..end_quote];
 
-    // Fast path: no escapes.
-    if !content.contains(&b'\\') {
+    // Fast path: no escapes (tracked during the single scan above).
+    if !has_escape {
         let s = as_str(content).to_owned();
         let mut consumed = end_quote + 1;
         if consumed < data.len() && data[consumed] == b',' {
