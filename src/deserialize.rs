@@ -67,15 +67,11 @@ pub fn deserialize_dump_from_bytes(
         .map(|&(start, end)| parse_chunk(&content[start..end], opts))
         .collect();
 
-    let mut dump = FonDump::with_capacity(content.len() / 64);
-    let mut key = 0u64;
+    let mut records: Vec<FonCollection> = Vec::with_capacity(content.len() / 64);
     for part in parts {
-        for collection in part? {
-            dump.add(key, collection);
-            key += 1;
-        }
+        records.extend(part?);
     }
-    Ok(dump)
+    Ok(FonDump::from_records(records))
 }
 
 

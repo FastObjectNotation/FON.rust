@@ -17,7 +17,7 @@ pub fn serialize_to_string(collection: &FonCollection) -> String {
 
 
 pub fn serialize_dump_lines(dump: &FonDump, _max_threads: i32) -> Vec<String> {
-    let mut entries: Vec<(u64, &FonCollection)> = dump.iter().map(|(id, c)| (*id, c)).collect();
+    let mut entries: Vec<(u64, &FonCollection)> = dump.iter().collect();
     entries.sort_by_key(|(id, _)| *id);
 
     entries

@@ -108,9 +108,25 @@ impl FonCollection {
 }
 
 
+// Records keyed by id. `Dense` (ids are exactly 0..len) is the fast path used by
+// deserialization — no per-record hashing. Any non-contiguous insert promotes to
+// `Sparse`.
+enum FonDumpStore {
+    Dense(Vec<FonCollection>),
+    Sparse(HashMap<u64, FonCollection>),
+}
+
+
+impl Default for FonDumpStore {
+    fn default() -> Self {
+        FonDumpStore::Sparse(HashMap::new())
+    }
+}
+
+
 #[derive(Default)]
 pub struct FonDump {
-    data: HashMap<u64, FonCollection>,
+    store: FonDumpStore,
 }
 
 
@@ -122,37 +138,94 @@ impl FonDump {
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            data: HashMap::with_capacity(capacity),
+            store: FonDumpStore::Sparse(HashMap::with_capacity(capacity)),
+        }
+    }
+
+
+    // Build a dump from records keyed densely by position (0..len): the fast path
+    // for deserialization, no hashing.
+    pub fn from_records(records: Vec<FonCollection>) -> Self {
+        Self {
+            store: FonDumpStore::Dense(records),
         }
     }
 
 
     pub fn add(&mut self, id: u64, collection: FonCollection) {
-        self.data.insert(id, collection);
+        match &mut self.store {
+            FonDumpStore::Sparse(m) => {
+                m.insert(id, collection);
+                return;
+            }
+            FonDumpStore::Dense(v) if id as usize == v.len() => {
+                v.push(collection);
+                return;
+            }
+            FonDumpStore::Dense(_) => {}
+        }
+        // Non-contiguous id into a dense store: promote to sparse.
+        let old = std::mem::take(&mut self.store);
+        let mut map: HashMap<u64, FonCollection> = match old {
+            FonDumpStore::Dense(v) => v.into_iter().enumerate().map(|(i, c)| (i as u64, c)).collect(),
+            FonDumpStore::Sparse(m) => m,
+        };
+        map.insert(id, collection);
+        self.store = FonDumpStore::Sparse(map);
     }
 
 
     pub fn get(&self, id: u64) -> Option<&FonCollection> {
-        self.data.get(&id)
+        match &self.store {
+            FonDumpStore::Dense(v) => v.get(id as usize),
+            FonDumpStore::Sparse(m) => m.get(&id),
+        }
     }
 
 
     pub fn get_mut(&mut self, id: u64) -> Option<&mut FonCollection> {
-        self.data.get_mut(&id)
+        match &mut self.store {
+            FonDumpStore::Dense(v) => v.get_mut(id as usize),
+            FonDumpStore::Sparse(m) => m.get_mut(&id),
+        }
     }
 
 
     pub fn len(&self) -> usize {
-        self.data.len()
+        match &self.store {
+            FonDumpStore::Dense(v) => v.len(),
+            FonDumpStore::Sparse(m) => m.len(),
+        }
     }
 
 
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.len() == 0
     }
 
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, u64, FonCollection> {
-        self.data.iter()
+    pub fn iter(&self) -> FonDumpIter<'_> {
+        match &self.store {
+            FonDumpStore::Dense(v) => FonDumpIter::Dense(v.iter().enumerate()),
+            FonDumpStore::Sparse(m) => FonDumpIter::Sparse(m.iter()),
+        }
+    }
+}
+
+
+pub enum FonDumpIter<'a> {
+    Dense(std::iter::Enumerate<std::slice::Iter<'a, FonCollection>>),
+    Sparse(std::collections::hash_map::Iter<'a, u64, FonCollection>),
+}
+
+
+impl<'a> Iterator for FonDumpIter<'a> {
+    type Item = (u64, &'a FonCollection);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            FonDumpIter::Dense(it) => it.next().map(|(i, c)| (i as u64, c)),
+            FonDumpIter::Sparse(it) => it.next().map(|(k, c)| (*k, c)),
+        }
     }
 }
