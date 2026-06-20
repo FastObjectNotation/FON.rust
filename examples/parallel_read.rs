@@ -6,7 +6,9 @@
 //! Usage: `cargo run --release --example parallel_read -- [dir] [size_mb] [threads]`
 //! defaults: temp dir, 2048 MB, 8 threads.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -16,6 +18,7 @@ use fon::types::{FonCollection, FonDump, FonValue};
 
 
 const CHUNK: usize = 32 * 1024 * 1024;
+#[cfg(windows)]
 const SECTOR: usize = 4096;
 
 

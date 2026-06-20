@@ -1,8 +1,8 @@
 [package]
-name = "fon"
+name = "FON_rust"
 version = "0.3.0"
 edition = "2021"
-description = "Fast Object Notation - high-performance serialization core (Rust)"
+description = "Fast Object Notation - high-performance serialization core"
 license = "MIT"
 repository = "https://github.com/FastObjectNotation/FON.rust"
 

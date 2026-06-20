@@ -12,7 +12,9 @@
 //! Usage: `cargo run --release --example file_sizes -- [dir]`
 //! (default dir: the system temp dir; pass an SSD path like `E:\.temp`).
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;

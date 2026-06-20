@@ -1,6 +1,6 @@
 //! FON (Fast Object Notation) — high-performance serialization core.
 //!
-//! Idiomatic Rust library: types, serialization, and deserialization for the FON wire format.
+//! Types, serialization, and deserialization for the FON wire format.
 
 pub mod deserialize;
 pub mod error;

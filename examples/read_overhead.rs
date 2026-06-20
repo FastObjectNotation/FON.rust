@@ -8,7 +8,9 @@
 //! Usage: `cargo run --release --example read_overhead -- [dir] [size_mb]`
 //! defaults: system temp dir, 1024 MB.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;

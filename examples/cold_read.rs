@@ -13,7 +13,9 @@
 //! Usage: `cargo run --release --example cold_read -- [dir] [size_mb] [iters]`
 //! defaults: system temp dir, 10240 MB (10 GB), 5 iterations.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
