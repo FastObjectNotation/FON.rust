@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::raw_data::RawData;
 
@@ -67,9 +68,11 @@ impl FonValue {
 
 // Records have a handful of fields, so a flat Vec beats a per-record HashMap:
 // far fewer allocations on the parse hot path, and `get` is a short linear scan.
+// Keys are `Arc<str>` so a repeated key (every record shares the same field
+// names) is interned once and reused via cheap clones.
 #[derive(Default)]
 pub struct FonCollection {
-    data: Vec<(String, FonValue)>,
+    data: Vec<(Arc<str>, FonValue)>,
 }
 
 
@@ -79,18 +82,18 @@ impl FonCollection {
     }
 
 
-    pub fn add(&mut self, key: String, value: FonValue) {
+    pub fn add(&mut self, key: Arc<str>, value: FonValue) {
         self.data.push((key, value));
     }
 
 
     pub fn get(&self, key: &str) -> Option<&FonValue> {
-        self.data.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.data.iter().find(|(k, _)| k.as_ref() == key).map(|(_, v)| v)
     }
 
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut FonValue> {
-        self.data.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.data.iter_mut().find(|(k, _)| k.as_ref() == key).map(|(_, v)| v)
     }
 
 
@@ -104,7 +107,7 @@ impl FonCollection {
     }
 
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &FonValue)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Arc<str>, &FonValue)> {
         self.data.iter().map(|(k, v)| (k, v))
     }
 }

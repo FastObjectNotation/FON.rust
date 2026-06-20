@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
@@ -76,7 +78,8 @@ pub fn deserialize_dump_from_bytes(
 
 
 pub fn deserialize_line(line: &[u8], opts: &DeserializeOptions) -> Result<FonCollection, FonError> {
-    parse_collection_body(line, 0, opts)
+    let mut interner = KeyInterner::new();
+    parse_collection_body(line, 0, opts, &mut interner)
 }
 
 
@@ -114,6 +117,9 @@ fn chunk_bounds(content: &[u8], n: usize) -> Vec<(usize, usize)> {
 // lines and empty-parsed collections are dropped.
 fn parse_chunk(chunk: &[u8], opts: &DeserializeOptions) -> Result<Vec<FonCollection>, FonError> {
     let mut out = Vec::new();
+    // One interner shared across every record in the chunk: each distinct key is
+    // allocated once and reused for all records the worker parses.
+    let mut interner = KeyInterner::new();
     let len = chunk.len();
     let mut start = 0;
     let mut i = 0;
@@ -121,7 +127,7 @@ fn parse_chunk(chunk: &[u8], opts: &DeserializeOptions) -> Result<Vec<FonCollect
         let c = chunk[i];
         if c == b'\n' || c == b'\r' {
             if i > start {
-                let coll = deserialize_line(&chunk[start..i], opts)?;
+                let coll = parse_collection_body(&chunk[start..i], 0, opts, &mut interner)?;
                 if !coll.is_empty() {
                     out.push(coll);
                 }
@@ -134,7 +140,7 @@ fn parse_chunk(chunk: &[u8], opts: &DeserializeOptions) -> Result<Vec<FonCollect
         i += 1;
     }
     if start < len {
-        let coll = deserialize_line(&chunk[start..], opts)?;
+        let coll = parse_collection_body(&chunk[start..], 0, opts, &mut interner)?;
         if !coll.is_empty() {
             out.push(coll);
         }
@@ -143,10 +149,22 @@ fn parse_chunk(chunk: &[u8], opts: &DeserializeOptions) -> Result<Vec<FonCollect
 }
 
 
-fn parse_collection_body(
-    line: &[u8],
+type KeyInterner<'a> = HashMap<&'a str, Arc<str>>;
+
+
+// Keys repeat on every record (`id`, `name`, ...). Intern them so a repeated key
+// is allocated once and then shared via cheap Arc clones, instead of a fresh
+// String per field.
+fn intern<'a>(interner: &mut KeyInterner<'a>, key: &'a str) -> Arc<str> {
+    interner.entry(key).or_insert_with(|| Arc::from(key)).clone()
+}
+
+
+fn parse_collection_body<'a>(
+    line: &'a [u8],
     depth: i32,
     opts: &DeserializeOptions,
+    interner: &mut KeyInterner<'a>,
 ) -> Result<FonCollection, FonError> {
     let mut collection = FonCollection::new();
     let mut pos = 0;
@@ -157,9 +175,9 @@ fn parse_collection_body(
             None => break,
         };
 
-        let key = std::str::from_utf8(&line[pos..eq_pos])
-            .map_err(|_| FonError::Parse("Invalid UTF-8 in key".into()))?
-            .to_owned();
+        let key_str = std::str::from_utf8(&line[pos..eq_pos])
+            .map_err(|_| FonError::Parse("Invalid UTF-8 in key".into()))?;
+        let key = intern(interner, key_str);
         pos = eq_pos + 1;
 
         if pos >= line.len() || pos + 1 >= line.len() || line[pos + 1] != b':' {
@@ -172,7 +190,7 @@ fn parse_collection_body(
         pos += 2;
 
         let remaining = &line[pos..];
-        let (value, consumed) = parse_value(remaining, type_char, depth, opts)?;
+        let (value, consumed) = parse_value(remaining, type_char, depth, opts, interner)?;
         collection.add(key, value);
         pos += consumed;
 
@@ -185,11 +203,12 @@ fn parse_collection_body(
 }
 
 
-fn parse_value(
-    data: &[u8],
+fn parse_value<'a>(
+    data: &'a [u8],
     type_char: u8,
     depth: i32,
     opts: &DeserializeOptions,
+    interner: &mut KeyInterner<'a>,
 ) -> Result<(FonValue, usize), FonError> {
     if data.is_empty() {
         return Err(FonError::Parse("Empty value".into()));
@@ -197,11 +216,11 @@ fn parse_value(
 
     if type_char == TYPE_OBJECT {
         if data[0] == b'{' {
-            let (obj, consumed) = parse_object(data, depth + 1, opts)?;
+            let (obj, consumed) = parse_object(data, depth + 1, opts, interner)?;
             return Ok((FonValue::Object(obj), consumed));
         }
         if data[0] == b'[' {
-            let (arr, consumed) = parse_object_array(data, depth + 1, opts)?;
+            let (arr, consumed) = parse_object_array(data, depth + 1, opts, interner)?;
             return Ok((FonValue::ObjectArray(arr), consumed));
         }
         return Err(FonError::Parse("Object must start with '{' or '['".into()));
@@ -419,10 +438,11 @@ fn find_closing_brace(data: &[u8]) -> Result<usize, FonError> {
 }
 
 
-fn parse_object(
-    data: &[u8],
+fn parse_object<'a>(
+    data: &'a [u8],
     depth: i32,
     opts: &DeserializeOptions,
+    interner: &mut KeyInterner<'a>,
 ) -> Result<(Box<FonCollection>, usize), FonError> {
     if depth > opts.max_depth {
         return Err(FonError::Parse("Maximum nesting depth exceeded".into()));
@@ -434,7 +454,7 @@ fn parse_object(
     let close = find_closing_brace(data)?;
     let body = &data[1..close];
 
-    let collection = parse_collection_body(body, depth, opts)?;
+    let collection = parse_collection_body(body, depth, opts, interner)?;
 
     let mut consumed = close + 1;
     if consumed < data.len() && data[consumed] == b',' {
@@ -446,10 +466,11 @@ fn parse_object(
 
 
 #[allow(clippy::vec_box)] // Vec<Box<FonCollection>> matches FonValue::ObjectArray variant
-fn parse_object_array(
-    data: &[u8],
+fn parse_object_array<'a>(
+    data: &'a [u8],
     depth: i32,
     opts: &DeserializeOptions,
+    interner: &mut KeyInterner<'a>,
 ) -> Result<(Vec<Box<FonCollection>>, usize), FonError> {
     if depth > opts.max_depth {
         return Err(FonError::Parse("Maximum nesting depth exceeded".into()));
@@ -470,7 +491,7 @@ fn parse_object_array(
                 "Object array element must start with '{'".into(),
             ));
         }
-        let (obj, consumed) = parse_object(remaining, depth, opts)?;
+        let (obj, consumed) = parse_object(remaining, depth, opts, interner)?;
         result.push(obj);
         pos += consumed;
     }
