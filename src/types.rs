@@ -82,8 +82,8 @@ impl FonCollection {
     }
 
 
-    pub fn add(&mut self, key: Arc<str>, value: FonValue) {
-        self.data.push((key, value));
+    pub fn add(&mut self, key: impl Into<Arc<str>>, value: FonValue) {
+        self.data.push((key.into(), value));
     }
 
 

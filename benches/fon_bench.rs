@@ -20,11 +20,11 @@ use fon::{
 
 fn make_record(i: u64) -> FonCollection {
     let mut c = FonCollection::new();
-    c.add("id".into(), FonValue::ULong(i));
-    c.add("name".into(), FonValue::String(format!("record number {i}")));
-    c.add("price".into(), FonValue::Double(i as f64 * 1.5));
-    c.add("active".into(), FonValue::Bool(i.is_multiple_of(2)));
-    c.add("tags".into(), FonValue::IntArray(vec![1, 2, 3, 4, 5]));
+    c.add("id", FonValue::ULong(i));
+    c.add("name", FonValue::String(format!("record number {i}")));
+    c.add("price", FonValue::Double(i as f64 * 1.5));
+    c.add("active", FonValue::Bool(i.is_multiple_of(2)));
+    c.add("tags", FonValue::IntArray(vec![1, 2, 3, 4, 5]));
     c
 }
 

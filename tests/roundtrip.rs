@@ -11,9 +11,9 @@ fn roundtrip(c: &FonCollection) -> FonCollection {
 #[test]
 fn primitives_roundtrip() {
     let mut c = FonCollection::new();
-    c.add("id".into(), FonValue::Int(42));
-    c.add("name".into(), FonValue::String("Test".into()));
-    c.add("active".into(), FonValue::Bool(true));
+    c.add("id", FonValue::Int(42));
+    c.add("name", FonValue::String("Test".into()));
+    c.add("active", FonValue::Bool(true));
     let back = roundtrip(&c);
     assert!(matches!(back.get("id"), Some(FonValue::Int(42))));
     assert!(matches!(back.get("active"), Some(FonValue::Bool(true))));
@@ -27,7 +27,7 @@ fn primitives_roundtrip() {
 #[test]
 fn int_array_roundtrip() {
     let mut c = FonCollection::new();
-    c.add("xs".into(), FonValue::IntArray(vec![1, 2, 3]));
+    c.add("xs", FonValue::IntArray(vec![1, 2, 3]));
     let back = roundtrip(&c);
     match back.get("xs") {
         Some(FonValue::IntArray(v)) => assert_eq!(v, &vec![1, 2, 3]),
@@ -39,9 +39,9 @@ fn int_array_roundtrip() {
 #[test]
 fn nested_object_roundtrip() {
     let mut addr = FonCollection::new();
-    addr.add("zip".into(), FonValue::Int(10001));
+    addr.add("zip", FonValue::Int(10001));
     let mut c = FonCollection::new();
-    c.add("addr".into(), FonValue::Object(Box::new(addr)));
+    c.add("addr", FonValue::Object(Box::new(addr)));
     let back = roundtrip(&c);
     match back.get("addr") {
         Some(FonValue::Object(b)) => assert!(matches!(b.get("zip"), Some(FonValue::Int(10001)))),
@@ -62,7 +62,7 @@ fn max_depth_enforced() {
 #[test]
 fn bom_is_stripped_in_dump() {
     let mut c = FonCollection::new();
-    c.add("id".into(), FonValue::Int(7));
+    c.add("id", FonValue::Int(7));
     let line = serialize_to_string(&c);
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
     bytes.extend_from_slice(line.as_bytes());

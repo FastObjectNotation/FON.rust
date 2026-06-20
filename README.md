@@ -66,10 +66,10 @@ use fon::types::{FonCollection, FonValue};
 use fon::{serialize_to_string, deserialize_line, DeserializeOptions};
 
 let mut record = FonCollection::new();
-record.add("id".into(), FonValue::Int(42));
-record.add("name".into(), FonValue::String("Test Item".into()));
-record.add("price".into(), FonValue::Double(99.99));
-record.add("tags".into(), FonValue::StringArray(vec!["sale".into(), "new".into()]));
+record.add("id", FonValue::Int(42));
+record.add("name", FonValue::String("Test Item".into()));
+record.add("price", FonValue::Double(99.99));
+record.add("tags", FonValue::StringArray(vec!["sale".into(), "new".into()]));
 
 let line = serialize_to_string(&record);
 // id=i:42,name=s:"Test Item",price=d:99.99,tags=s:["sale","new"]
@@ -88,8 +88,8 @@ use fon::{serialize_to_file, deserialize_from_file, DeserializeOptions};
 let mut dump = FonDump::new();
 for id in 0..1000u64 {
     let mut r = FonCollection::new();
-    r.add("id".into(), FonValue::ULong(id));
-    r.add("text".into(), FonValue::String(format!("row {id}")));
+    r.add("id", FonValue::ULong(id));
+    r.add("text", FonValue::String(format!("row {id}")));
     dump.add(id, r);
 }
 
@@ -110,18 +110,18 @@ for (id, record) in loaded.iter() {
 use fon::types::{FonCollection, FonValue};
 
 let mut addr = FonCollection::new();
-addr.add("city".into(), FonValue::String("NY".into()));
-addr.add("zip".into(), FonValue::Int(10001));
+addr.add("city", FonValue::String("NY".into()));
+addr.add("zip", FonValue::Int(10001));
 
 let mut user = FonCollection::new();
-user.add("id".into(), FonValue::Int(42));
-user.add("addr".into(), FonValue::Object(Box::new(addr)));
+user.add("id", FonValue::Int(42));
+user.add("addr", FonValue::Object(Box::new(addr)));
 
 let mut first = FonCollection::new();
-first.add("qty".into(), FonValue::Int(5));
+first.add("qty", FonValue::Int(5));
 let mut second = FonCollection::new();
-second.add("qty".into(), FonValue::Int(3));
-user.add("items".into(), FonValue::ObjectArray(vec![Box::new(first), Box::new(second)]));
+second.add("qty", FonValue::Int(3));
+user.add("items", FonValue::ObjectArray(vec![Box::new(first), Box::new(second)]));
 ```
 
 ### Binary data and parse options
