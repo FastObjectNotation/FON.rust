@@ -1,0 +1,19 @@
+[package]
+name = "fon"
+version = "0.2.1"
+edition = "2021"
+description = "Fast Object Notation - high-performance serialization core (Rust)"
+license = "MIT"
+repository = "https://github.com/FastObjectNotation/FON.rust"
+
+[lib]
+name = "fon"
+path = "src/lib.rs"
+
+[dependencies]
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
