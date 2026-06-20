@@ -90,11 +90,8 @@ fn serialize_value(out: &mut String, value: &FonValue) {
         FonValue::String(s) => serialize_string(out, s),
         FonValue::Raw(raw) => {
             out.push('"');
-            // SAFETY-equivalent: we need to call pack() to produce the encoded form.
-            // Rust borrow rules require interior mutability OR an owned mut. The native
-            // C++ casts away const here. We instead treat Raw as logically "lazy-encoded":
-            // we pack a clone if not yet encoded. Cheaper alt: require caller to pack
-            // before serialize. For correctness, do a copy-pack only when needed.
+            // Raw is logically lazy-encoded: emit the encoded form if already
+            // packed, otherwise pack a copy (we only borrow `raw` here).
             if raw.is_packed() {
                 out.push_str(raw.encoded());
             } else if raw.is_unpacked() {
@@ -197,8 +194,7 @@ fn serialize_float(out: &mut String, v: f32) {
             out.push_str("inf");
         }
     } else {
-        // Match C++ to_chars shortest mode: minimal digits to roundtrip.
-        // Rust's default Display for f32/f64 uses Grisu/Dragon shortest.
+        // Shortest representation that round-trips (Rust's default float Display).
         write!(out, "{}", v).unwrap();
     }
 }

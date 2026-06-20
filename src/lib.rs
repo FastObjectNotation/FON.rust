@@ -1,8 +1,6 @@
 //! FON (Fast Object Notation) — high-performance serialization core.
 //!
-//! Idiomatic Rust library: types, serialization, and deserialization for the
-//! FON wire format. This crate is consumer-agnostic; FFI / C-ABI bindings live
-//! in the consuming projects (for example FON.net).
+//! Idiomatic Rust library: types, serialization, and deserialization for the FON wire format.
 
 pub mod deserialize;
 pub mod error;
