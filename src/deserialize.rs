@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
@@ -157,14 +156,24 @@ fn parse_chunk(chunk: &[u8], opts: &DeserializeOptions) -> Result<Vec<FonCollect
 }
 
 
-type KeyInterner<'a> = HashMap<&'a str, Arc<str>>;
+// A record schema has only a handful of distinct keys, so a tiny linear-scan
+// table interns them faster than a HashMap: no hashing on every key, no per-chunk
+// map allocation.
+type KeyInterner<'a> = Vec<(&'a str, Arc<str>)>;
 
 
 // Keys repeat on every record (`id`, `name`, ...). Intern them so a repeated key
 // is allocated once and then shared via cheap Arc clones, instead of a fresh
 // String per field.
 fn intern<'a>(interner: &mut KeyInterner<'a>, key: &'a str) -> Arc<str> {
-    interner.entry(key).or_insert_with(|| Arc::from(key)).clone()
+    for (existing, shared) in interner.iter() {
+        if *existing == key {
+            return Arc::clone(shared);
+        }
+    }
+    let shared: Arc<str> = Arc::from(key);
+    interner.push((key, Arc::clone(&shared)));
+    shared
 }
 
 
