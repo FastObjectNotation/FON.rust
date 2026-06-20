@@ -58,4 +58,9 @@ fn main() {
         mb / el.as_secs_f64(),
         dump.len() as f64 / 1e6 / el.as_secs_f64()
     );
+
+    // The parsed dump is large; tearing it down element-by-element can take
+    // longer than the parse itself. We only measure the parse, so let the OS
+    // reclaim everything at once on exit instead of waiting for Drop.
+    std::process::exit(0);
 }
