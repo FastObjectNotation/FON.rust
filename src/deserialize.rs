@@ -82,6 +82,7 @@ pub fn deserialize_dump_from_bytes(
 
 
 pub fn deserialize_line(line: &[u8], opts: &DeserializeOptions) -> Result<FonCollection, FonError> {
+    std::str::from_utf8(line).map_err(|_| FonError::Parse("Invalid UTF-8 in input".into()))?;
     let mut interner = KeyInterner::new();
     parse_collection_body(line, 0, opts, &mut interner)
 }
@@ -120,6 +121,9 @@ fn chunk_bounds(content: &[u8], n: usize) -> Vec<(usize, usize)> {
 // single-threaded splitter: '\n', '\r', and '\r\n' all terminate a line, empty
 // lines and empty-parsed collections are dropped.
 fn parse_chunk(chunk: &[u8], opts: &DeserializeOptions) -> Result<Vec<FonCollection>, FonError> {
+    // Validate the whole chunk as UTF-8 once so per-field parsing can skip it.
+    std::str::from_utf8(chunk).map_err(|_| FonError::Parse("Invalid UTF-8 in input".into()))?;
+
     let mut out = Vec::new();
     // One interner shared across every record in the chunk: each distinct key is
     // allocated once and reused for all records the worker parses.
@@ -177,6 +181,16 @@ fn intern<'a>(interner: &mut KeyInterner<'a>, key: &'a str) -> Arc<str> {
 }
 
 
+// SAFETY for all callers: `parse_chunk` and `deserialize_line` validate the whole
+// input as UTF-8 before any parsing, and every slice handed here is cut at an
+// ASCII delimiter (`=`, `:`, `,`, `"`, `[`, `]`) — which can only land on a UTF-8
+// character boundary — so the bytes are always valid UTF-8.
+#[inline]
+fn as_str(bytes: &[u8]) -> &str {
+    unsafe { std::str::from_utf8_unchecked(bytes) }
+}
+
+
 fn parse_collection_body<'a>(
     line: &'a [u8],
     depth: i32,
@@ -192,8 +206,7 @@ fn parse_collection_body<'a>(
             None => break,
         };
 
-        let key_str = std::str::from_utf8(&line[pos..eq_pos])
-            .map_err(|_| FonError::Parse("Invalid UTF-8 in key".into()))?;
+        let key_str = as_str(&line[pos..eq_pos]);
         let key = intern(interner, key_str);
         pos = eq_pos + 1;
 
@@ -280,8 +293,7 @@ fn parse_value<'a>(
     }
 
     let end = find_value_end(data);
-    let value_str = std::str::from_utf8(&data[..end])
-        .map_err(|_| FonError::Parse("Invalid UTF-8 in number".into()))?;
+    let value_str = as_str(&data[..end]);
     let mut consumed = end;
     if consumed < data.len() && data[consumed] == b',' {
         consumed += 1;
@@ -323,8 +335,7 @@ fn parse_number_array<T: FromStr>(data: &[u8]) -> Result<(Vec<T>, usize), FonErr
     while pos < content.len() {
         let remaining = &content[pos..];
         let end = find_value_end(remaining);
-        let s = std::str::from_utf8(&remaining[..end])
-            .map_err(|_| FonError::Parse("Invalid UTF-8 in number".into()))?;
+        let s = as_str(&remaining[..end]);
         result.push(parse_num::<T>(s)?);
         pos += end;
         if pos < content.len() && content[pos] == b',' {
@@ -358,9 +369,7 @@ fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
 
     // Fast path: no escapes.
     if !content.contains(&b'\\') {
-        let s = std::str::from_utf8(content)
-            .map_err(|_| FonError::Parse("Invalid UTF-8 in string".into()))?
-            .to_owned();
+        let s = as_str(content).to_owned();
         let mut consumed = end_quote + 1;
         if consumed < data.len() && data[consumed] == b',' {
             consumed += 1;
@@ -388,8 +397,9 @@ fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
         }
         i += 1;
     }
-    let s =
-        String::from_utf8(bytes).map_err(|_| FonError::Parse("Invalid UTF-8 in string".into()))?;
+    // SAFETY: `content` is valid UTF-8 and un-escaping only substitutes ASCII
+    // control bytes or copies existing bytes, so the result stays valid UTF-8.
+    let s = unsafe { String::from_utf8_unchecked(bytes) };
 
     let mut consumed = end_quote + 1;
     if consumed < data.len() && data[consumed] == b',' {
