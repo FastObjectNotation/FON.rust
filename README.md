@@ -54,7 +54,7 @@ Strings are double-quoted with `\n \r \t \b \f \" \\` escapes.
 
 ```toml
 [dependencies]
-FastObjectNotation = "0.3.0"
+FastObjectNotation = "0.3"
 ```
 
 Or with cargo:
