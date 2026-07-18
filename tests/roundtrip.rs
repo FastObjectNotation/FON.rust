@@ -51,6 +51,75 @@ fn nested_object_roundtrip() {
 
 
 #[test]
+fn string_array_roundtrip() {
+    let mut c = FonCollection::new();
+    c.add(
+        "tags",
+        FonValue::StringArray(vec![
+            "plain".to_string(),
+            "has, comma and \"quote\"".to_string(),
+            "last".to_string(),
+        ]),
+    );
+    let back = roundtrip(&c);
+    match back.get("tags") {
+        Some(FonValue::StringArray(v)) => {
+            assert_eq!(
+                v,
+                &vec![
+                    "plain".to_string(),
+                    "has, comma and \"quote\"".to_string(),
+                    "last".to_string(),
+                ]
+            );
+        }
+        _ => panic!("expected string array"),
+    }
+}
+
+
+#[test]
+fn bool_array_roundtrip() {
+    let mut c = FonCollection::new();
+    c.add("flags", FonValue::BoolArray(vec![true, false, true, true]));
+    let back = roundtrip(&c);
+    match back.get("flags") {
+        Some(FonValue::BoolArray(v)) => assert_eq!(v, &vec![true, false, true, true]),
+        _ => panic!("expected bool array"),
+    }
+}
+
+
+#[test]
+fn nested_string_and_bool_array_roundtrip() {
+    let mut inner = FonCollection::new();
+    inner.add(
+        "labels",
+        FonValue::StringArray(vec!["a,b".to_string(), "c\"d\"e".to_string()]),
+    );
+    inner.add("switches", FonValue::BoolArray(vec![false, true]));
+    let mut c = FonCollection::new();
+    c.add("inner", FonValue::Object(Box::new(inner)));
+    let back = roundtrip(&c);
+    match back.get("inner") {
+        Some(FonValue::Object(b)) => {
+            match b.get("labels") {
+                Some(FonValue::StringArray(v)) => {
+                    assert_eq!(v, &vec!["a,b".to_string(), "c\"d\"e".to_string()]);
+                }
+                _ => panic!("expected nested string array"),
+            }
+            match b.get("switches") {
+                Some(FonValue::BoolArray(v)) => assert_eq!(v, &vec![false, true]),
+                _ => panic!("expected nested bool array"),
+            }
+        }
+        _ => panic!("expected nested object"),
+    }
+}
+
+
+#[test]
 fn max_depth_enforced() {
     let s = "a=o:{b=o:{c=i:1}}";
     let shallow = DeserializeOptions { max_depth: 1, unpack_raw: false };

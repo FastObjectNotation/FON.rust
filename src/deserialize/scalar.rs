@@ -145,3 +145,58 @@ pub(super) fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
     }
     Ok((s, consumed))
 }
+
+
+pub(super) fn parse_string_array(data: &[u8]) -> Result<(Vec<String>, usize), FonError> {
+    if data[0] != b'[' {
+        return Err(FonError::Parse("Array must start with '['".into()));
+    }
+
+    let close = find_closing_bracket(data)?;
+    let content = &data[1..close];
+
+    let mut result: Vec<String> = Vec::new();
+    let mut pos = 0;
+    while pos < content.len() {
+        let remaining = &content[pos..];
+        let (s, consumed) = parse_string(remaining)?;
+        result.push(s);
+        pos += consumed;
+    }
+
+    let mut total_consumed = close + 1;
+    if total_consumed < data.len() && data[total_consumed] == b',' {
+        total_consumed += 1;
+    }
+
+    Ok((result, total_consumed))
+}
+
+
+pub(super) fn parse_bool_array(data: &[u8]) -> Result<(Vec<bool>, usize), FonError> {
+    if data[0] != b'[' {
+        return Err(FonError::Parse("Array must start with '['".into()));
+    }
+
+    let close = find_closing_bracket(data)?;
+    let content = &data[1..close];
+
+    let mut result: Vec<bool> = Vec::with_capacity(content.len() / 2);
+    let mut pos = 0;
+    while pos < content.len() {
+        let remaining = &content[pos..];
+        let end = find_value_end(remaining);
+        result.push(remaining[0] != b'0');
+        pos += end;
+        if pos < content.len() && content[pos] == b',' {
+            pos += 1;
+        }
+    }
+
+    let mut total_consumed = close + 1;
+    if total_consumed < data.len() && data[total_consumed] == b',' {
+        total_consumed += 1;
+    }
+
+    Ok((result, total_consumed))
+}

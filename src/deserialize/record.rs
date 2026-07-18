@@ -8,7 +8,7 @@ use crate::types::{
     TYPE_OBJECT, TYPE_RAW, TYPE_SHORT, TYPE_STRING, TYPE_UINT, TYPE_ULONG,
 };
 
-use super::scalar::{parse_num, parse_number_array, parse_string};
+use super::scalar::{parse_bool_array, parse_num, parse_number_array, parse_string, parse_string_array};
 use super::scan::{find_byte, find_closing_brace, find_closing_bracket, find_value_end};
 use super::{as_str, intern, DeserializeOptions, KeyInterner};
 
@@ -96,6 +96,8 @@ fn parse_value<'a>(
             TYPE_DOUBLE => {
                 parse_number_array::<f64>(data).map(|(v, c)| (FonValue::DoubleArray(v), c))
             }
+            TYPE_STRING => parse_string_array(data).map(|(v, c)| (FonValue::StringArray(v), c)),
+            TYPE_BOOL => parse_bool_array(data).map(|(v, c)| (FonValue::BoolArray(v), c)),
             _ => Err(FonError::Parse("Unsupported array type".into())),
         };
     }
