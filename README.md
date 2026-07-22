@@ -52,13 +52,6 @@ Strings are double-quoted with `\n \r \t \b \f \" \\` escapes.
 
 ## Install
 
-```toml
-[dependencies]
-FastObjectNotation = "0.3"
-```
-
-Or with cargo:
-
 ```bash
 cargo add FastObjectNotation
 ```
