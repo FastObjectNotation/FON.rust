@@ -103,3 +103,35 @@ fn replace_absent_id_errors() {
     dump.remove(0);
     assert!(dump.replace(0, record(0)).is_err());
 }
+
+
+#[test]
+fn record_gen_bumps_on_remove_and_replace_only() {
+    let mut dump = FonDump::from_records(vec![record(0), record(1)]);
+    dump.ensure_mutable();
+    let g0 = dump.record_gen(1).unwrap();
+
+    // A tree-gen bump does NOT change record_gen (so a record view survives field edits).
+    assert!(dump.bump_tree_gen(1));
+    assert_eq!(dump.record_gen(1).unwrap(), g0);
+    assert_eq!(dump.tree_gen(1).unwrap(), 1);
+
+    // replace bumps record_gen.
+    dump.replace(1, record(2)).unwrap();
+    assert_eq!(dump.record_gen(1).unwrap(), g0 + 1);
+
+    // remove makes both generations unreadable (absent).
+    assert!(dump.remove(1));
+    assert!(dump.record_gen(1).is_none());
+    assert!(dump.tree_gen(1).is_none());
+    assert!(!dump.bump_tree_gen(1)); // can't bump an absent record
+}
+
+#[test]
+fn gens_readable_on_dense_without_mutation() {
+    // A never-mutated Dense dump reports generation 0 for present ids, None otherwise.
+    let dump = FonDump::from_records(vec![record(0), record(1)]);
+    assert_eq!(dump.record_gen(0), Some(0));
+    assert_eq!(dump.tree_gen(1), Some(0));
+    assert_eq!(dump.record_gen(2), None);
+}

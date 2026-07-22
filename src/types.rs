@@ -367,6 +367,61 @@ impl FonDump {
             _ => Err(FonError::InvalidArgument(format!("no record with id {id} to replace"))),
         }
     }
+
+
+    /// Generation of the record at `id`, bumped by `remove`/`replace`. `None` if there is
+    /// no live record. A record view is valid while this matches the value it captured.
+    pub fn record_gen(&self, id: u64) -> Option<u32> {
+        match &self.store {
+            FonDumpStore::Dense(v) => {
+                if (id as usize) < v.len() { Some(0) } else { None }
+            }
+            FonDumpStore::Slab { slots, .. } => {
+                slots.get(id as usize).filter(|s| s.value.is_some()).map(|s| s.record_gen)
+            }
+            FonDumpStore::Sparse { map, .. } => {
+                map.get(&id).filter(|s| s.value.is_some()).map(|s| s.record_gen)
+            }
+        }
+    }
+
+
+    /// Generation of the record's field tree at `id`, bumped by any field-level mutation
+    /// (`bump_tree_gen`). `None` if there is no live record. A nested view is valid while
+    /// both this and `record_gen` match the values it captured.
+    pub fn tree_gen(&self, id: u64) -> Option<u32> {
+        match &self.store {
+            FonDumpStore::Dense(v) => {
+                if (id as usize) < v.len() { Some(0) } else { None }
+            }
+            FonDumpStore::Slab { slots, .. } => {
+                slots.get(id as usize).filter(|s| s.value.is_some()).map(|s| s.tree_gen)
+            }
+            FonDumpStore::Sparse { map, .. } => {
+                map.get(&id).filter(|s| s.value.is_some()).map(|s| s.tree_gen)
+            }
+        }
+    }
+
+
+    /// Bump the field-tree generation for the record at `id` after a field-level mutation
+    /// somewhere in its tree. Returns `false` if there is no live record. Promotes
+    /// `Dense → Slab` so the counter has somewhere to live.
+    pub fn bump_tree_gen(&mut self, id: u64) -> bool {
+        self.ensure_mutable();
+        let slot = match &mut self.store {
+            FonDumpStore::Slab { slots, .. } => slots.get_mut(id as usize),
+            FonDumpStore::Sparse { map, .. } => map.get_mut(&id),
+            FonDumpStore::Dense(_) => unreachable!("ensure_mutable promoted away Dense"),
+        };
+        match slot {
+            Some(slot) if slot.value.is_some() => {
+                slot.tree_gen = slot.tree_gen.wrapping_add(1);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 
