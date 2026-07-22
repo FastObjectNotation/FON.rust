@@ -113,18 +113,38 @@ impl FonCollection {
 }
 
 
-// Records keyed by id. `Dense` (ids are exactly 0..len) is the fast path used by
-// deserialization — no per-record hashing. Any non-contiguous insert promotes to
-// `Sparse`.
+// A record cell in a mutable store. `value == None` is a tombstone: a removed record
+// or an unfilled gap. The record is boxed so growing the slot vector never moves a live
+// record — borrowed pointers into a live record survive any add/remove.
+struct Slot {
+    record_gen: u32,
+    tree_gen: u32,
+    value: Option<Box<FonCollection>>,
+}
+
+
+impl Slot {
+    fn occupied(c: FonCollection) -> Self {
+        Slot { record_gen: 0, tree_gen: 0, value: Some(Box::new(c)) }
+    }
+}
+
+
+// `Dense` is the deserialization fast path (ids are exactly `0..len`, no boxing, no
+// hashing). The first mutation promotes it to `Slab`, whose slots carry the generation
+// counters used to validate borrowed views. `Sparse` holds the same generation-bearing
+// slots for arbitrary / very large ids. `live` is the number of occupied slots so
+// `len()` stays O(1) despite tombstones.
 enum FonDumpStore {
     Dense(Vec<FonCollection>),
-    Sparse(HashMap<u64, FonCollection>),
+    Slab { slots: Vec<Slot>, live: usize },
+    Sparse { map: HashMap<u64, Slot>, live: usize },
 }
 
 
 impl Default for FonDumpStore {
     fn default() -> Self {
-        FonDumpStore::Sparse(HashMap::new())
+        FonDumpStore::Sparse { map: HashMap::new(), live: 0 }
     }
 }
 
@@ -143,7 +163,7 @@ impl FonDump {
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            store: FonDumpStore::Sparse(HashMap::with_capacity(capacity)),
+            store: FonDumpStore::Sparse { map: HashMap::with_capacity(capacity), live: 0 },
         }
     }
 
@@ -159,31 +179,71 @@ impl FonDump {
 
     pub fn add(&mut self, id: u64, collection: FonCollection) {
         match &mut self.store {
-            FonDumpStore::Sparse(m) => {
-                m.insert(id, collection);
-                return;
-            }
             FonDumpStore::Dense(v) if id as usize == v.len() => {
                 v.push(collection);
                 return;
             }
-            FonDumpStore::Dense(_) => {}
+            FonDumpStore::Dense(_) => {
+                // Non-contiguous add into a dense store: promote to sparse (historic behavior).
+                let old = std::mem::take(&mut self.store);
+                let (mut map, mut live) = match old {
+                    FonDumpStore::Dense(v) => {
+                        let live = v.len();
+                        let map: HashMap<u64, Slot> =
+                            v.into_iter().enumerate().map(|(i, c)| (i as u64, Slot::occupied(c))).collect();
+                        (map, live)
+                    }
+                    _ => unreachable!(),
+                };
+                sparse_insert(&mut map, &mut live, id, collection);
+                self.store = FonDumpStore::Sparse { map, live };
+                return;
+            }
+            FonDumpStore::Slab { slots, live } => {
+                let idx = id as usize;
+                if idx == slots.len() {
+                    slots.push(Slot::occupied(collection));
+                    *live += 1;
+                    return;
+                }
+                if idx < slots.len() {
+                    let slot = &mut slots[idx];
+                    if slot.value.is_none() {
+                        *live += 1;
+                    } else {
+                        slot.record_gen = slot.record_gen.wrapping_add(1);
+                    }
+                    slot.value = Some(Box::new(collection));
+                    return;
+                }
+                // Gap beyond the end: promote to sparse rather than pad unboundedly.
+                let old = std::mem::take(&mut self.store);
+                if let FonDumpStore::Slab { slots, live } = old {
+                    let mut map: HashMap<u64, Slot> =
+                        slots.into_iter().enumerate().map(|(i, s)| (i as u64, s)).collect();
+                    let mut live = live;
+                    sparse_insert(&mut map, &mut live, id, collection);
+                    self.store = FonDumpStore::Sparse { map, live };
+                }
+                return;
+            }
+            FonDumpStore::Sparse { map, live } => {
+                sparse_insert(map, live, id, collection);
+                return;
+            }
         }
-        // Non-contiguous id into a dense store: promote to sparse.
-        let old = std::mem::take(&mut self.store);
-        let mut map: HashMap<u64, FonCollection> = match old {
-            FonDumpStore::Dense(v) => v.into_iter().enumerate().map(|(i, c)| (i as u64, c)).collect(),
-            FonDumpStore::Sparse(m) => m,
-        };
-        map.insert(id, collection);
-        self.store = FonDumpStore::Sparse(map);
     }
 
 
     pub fn get(&self, id: u64) -> Option<&FonCollection> {
         match &self.store {
             FonDumpStore::Dense(v) => v.get(id as usize),
-            FonDumpStore::Sparse(m) => m.get(&id),
+            FonDumpStore::Slab { slots, .. } => {
+                slots.get(id as usize).and_then(|s| s.value.as_deref())
+            }
+            FonDumpStore::Sparse { map, .. } => {
+                map.get(&id).and_then(|s| s.value.as_deref())
+            }
         }
     }
 
@@ -191,7 +251,12 @@ impl FonDump {
     pub fn get_mut(&mut self, id: u64) -> Option<&mut FonCollection> {
         match &mut self.store {
             FonDumpStore::Dense(v) => v.get_mut(id as usize),
-            FonDumpStore::Sparse(m) => m.get_mut(&id),
+            FonDumpStore::Slab { slots, .. } => {
+                slots.get_mut(id as usize).and_then(|s| s.value.as_deref_mut())
+            }
+            FonDumpStore::Sparse { map, .. } => {
+                map.get_mut(&id).and_then(|s| s.value.as_deref_mut())
+            }
         }
     }
 
@@ -199,7 +264,8 @@ impl FonDump {
     pub fn len(&self) -> usize {
         match &self.store {
             FonDumpStore::Dense(v) => v.len(),
-            FonDumpStore::Sparse(m) => m.len(),
+            FonDumpStore::Slab { live, .. } => *live,
+            FonDumpStore::Sparse { live, .. } => *live,
         }
     }
 
@@ -209,10 +275,46 @@ impl FonDump {
     }
 
 
+    /// Promote a `Dense` store to `Slab` so records live in generation-bearing slots.
+    /// No-op if already mutable. Call this before handing out an editable record pointer
+    /// or before any field mutation, so a later promotion cannot move a record out from
+    /// under a borrowed pointer.
+    pub fn ensure_mutable(&mut self) {
+        if let FonDumpStore::Dense(_) = &self.store {
+            let old = std::mem::replace(&mut self.store, FonDumpStore::Slab { slots: Vec::new(), live: 0 });
+            if let FonDumpStore::Dense(v) = old {
+                let live = v.len();
+                let slots = v.into_iter().map(Slot::occupied).collect();
+                self.store = FonDumpStore::Slab { slots, live };
+            }
+        }
+    }
+
+
     pub fn iter(&self) -> FonDumpIter<'_> {
         match &self.store {
             FonDumpStore::Dense(v) => FonDumpIter::Dense(v.iter().enumerate()),
-            FonDumpStore::Sparse(m) => FonDumpIter::Sparse(m.iter()),
+            FonDumpStore::Slab { slots, .. } => FonDumpIter::Slab(slots.iter().enumerate()),
+            FonDumpStore::Sparse { map, .. } => FonDumpIter::Sparse(map.iter()),
+        }
+    }
+}
+
+
+// Insert/overwrite a sparse slot, keeping `live` accurate and bumping `record_gen`
+// when an existing live record is overwritten or a tombstone is refilled.
+fn sparse_insert(map: &mut HashMap<u64, Slot>, live: &mut usize, id: u64, c: FonCollection) {
+    match map.get_mut(&id) {
+        Some(slot) => {
+            if slot.value.is_none() {
+                *live += 1;
+            }
+            slot.record_gen = slot.record_gen.wrapping_add(1);
+            slot.value = Some(Box::new(c));
+        }
+        None => {
+            map.insert(id, Slot::occupied(c));
+            *live += 1;
         }
     }
 }
@@ -220,7 +322,8 @@ impl FonDump {
 
 pub enum FonDumpIter<'a> {
     Dense(std::iter::Enumerate<std::slice::Iter<'a, FonCollection>>),
-    Sparse(std::collections::hash_map::Iter<'a, u64, FonCollection>),
+    Slab(std::iter::Enumerate<std::slice::Iter<'a, Slot>>),
+    Sparse(std::collections::hash_map::Iter<'a, u64, Slot>),
 }
 
 
@@ -230,7 +333,22 @@ impl<'a> Iterator for FonDumpIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             FonDumpIter::Dense(it) => it.next().map(|(i, c)| (i as u64, c)),
-            FonDumpIter::Sparse(it) => it.next().map(|(k, c)| (*k, c)),
+            FonDumpIter::Slab(it) => {
+                for (i, slot) in it.by_ref() {
+                    if let Some(c) = slot.value.as_deref() {
+                        return Some((i as u64, c));
+                    }
+                }
+                None
+            }
+            FonDumpIter::Sparse(it) => {
+                for (k, slot) in it.by_ref() {
+                    if let Some(c) = slot.value.as_deref() {
+                        return Some((*k, c));
+                    }
+                }
+                None
+            }
         }
     }
 }
