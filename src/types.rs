@@ -298,6 +298,53 @@ impl FonDump {
             FonDumpStore::Sparse { map, .. } => FonDumpIter::Sparse(map.iter()),
         }
     }
+
+
+    /// Remove the record with `id`. Returns `true` if a live record was removed, `false`
+    /// if there was none (not an error). Other records keep their ids — removal never
+    /// shifts neighbours.
+    pub fn remove(&mut self, id: u64) -> bool {
+        self.ensure_mutable();
+        match &mut self.store {
+            FonDumpStore::Slab { slots, live } => {
+                match slots.get_mut(id as usize) {
+                    Some(slot) if slot.value.is_some() => {
+                        slot.value = None;
+                        slot.record_gen = slot.record_gen.wrapping_add(1);
+                        *live -= 1;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            FonDumpStore::Sparse { map, live } => {
+                match map.get_mut(&id) {
+                    Some(slot) if slot.value.is_some() => {
+                        slot.value = None;
+                        slot.record_gen = slot.record_gen.wrapping_add(1);
+                        *live -= 1;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            FonDumpStore::Dense(_) => unreachable!("ensure_mutable promoted away Dense"),
+        }
+    }
+
+
+    /// Remove every id in `ids`, returning how many live records were actually removed
+    /// (absent or duplicate ids don't count).
+    pub fn remove_many(&mut self, ids: &[u64]) -> usize {
+        self.ensure_mutable();
+        let mut removed = 0;
+        for &id in ids {
+            if self.remove(id) {
+                removed += 1;
+            }
+        }
+        removed
+    }
 }
 
 

@@ -50,3 +50,36 @@ fn iter_after_promotion_yields_all_live_records() {
     ids.sort();
     assert_eq!(ids, vec![(0, 100), (1, 101)]);
 }
+
+
+#[test]
+fn remove_keeps_other_ids_stable() {
+    let mut dump = FonDump::from_records(vec![record(0), record(1), record(2), record(3)]);
+
+    assert!(dump.remove(1));
+    assert_eq!(dump.len(), 3);
+    assert!(dump.get(1).is_none());          // tombstoned
+    assert_eq!(id_of(dump.get(0).unwrap()), 0); // neighbours unmoved
+    assert_eq!(id_of(dump.get(2).unwrap()), 2);
+    assert_eq!(id_of(dump.get(3).unwrap()), 3);
+
+    // Iteration (what serialization consumes) skips the tombstone, so a save/load
+    // renumbers the survivors 0,1,2 — the documented id-across-serialize behavior.
+    let mut ids: Vec<u64> = dump.iter().map(|(id, _)| id).collect();
+    ids.sort();
+    assert_eq!(ids, vec![0, 2, 3]);
+
+    // Removing an absent / already-removed id is false, not an error.
+    assert!(!dump.remove(1));
+    assert!(!dump.remove(99));
+}
+
+
+#[test]
+fn remove_many_counts_only_live_removals() {
+    let mut dump = FonDump::from_records(vec![record(0), record(1), record(2)]);
+    let removed = dump.remove_many(&[0, 2, 2, 99]); // 2 listed twice, 99 absent
+    assert_eq!(removed, 2);
+    assert_eq!(dump.len(), 1);
+    assert_eq!(id_of(dump.get(1).unwrap()), 1);
+}
