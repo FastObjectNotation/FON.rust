@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::error::FonError;
 use crate::raw_data::RawData;
 
 
@@ -344,6 +345,27 @@ impl FonDump {
             }
         }
         removed
+    }
+
+
+    /// Replace the record at `id` with a new collection. Errors if `id` has no live record
+    /// (use `add` to create). Bumps the record's generation so borrowed views of the old
+    /// record become stale.
+    pub fn replace(&mut self, id: u64, collection: FonCollection) -> Result<(), FonError> {
+        self.ensure_mutable();
+        let slot = match &mut self.store {
+            FonDumpStore::Slab { slots, .. } => slots.get_mut(id as usize),
+            FonDumpStore::Sparse { map, .. } => map.get_mut(&id),
+            FonDumpStore::Dense(_) => unreachable!("ensure_mutable promoted away Dense"),
+        };
+        match slot {
+            Some(slot) if slot.value.is_some() => {
+                slot.value = Some(Box::new(collection));
+                slot.record_gen = slot.record_gen.wrapping_add(1);
+                Ok(())
+            }
+            _ => Err(FonError::InvalidArgument(format!("no record with id {id} to replace"))),
+        }
     }
 }
 

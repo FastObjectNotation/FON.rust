@@ -83,3 +83,23 @@ fn remove_many_counts_only_live_removals() {
     assert_eq!(dump.len(), 1);
     assert_eq!(id_of(dump.get(1).unwrap()), 1);
 }
+
+
+#[test]
+fn replace_swaps_existing_record() {
+    let mut dump = FonDump::from_records(vec![record(0), record(1)]);
+    dump.replace(1, record(99)).expect("replace existing id");
+    assert_eq!(dump.len(), 2);
+    assert_eq!(id_of(dump.get(1).unwrap()), 99);
+    assert_eq!(id_of(dump.get(0).unwrap()), 0);
+}
+
+#[test]
+fn replace_absent_id_errors() {
+    let mut dump = FonDump::from_records(vec![record(0)]);
+    let err = dump.replace(5, record(5));
+    assert!(err.is_err());
+    // Replacing a tombstoned id also errors.
+    dump.remove(0);
+    assert!(dump.replace(0, record(0)).is_err());
+}
