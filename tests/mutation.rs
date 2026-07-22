@@ -135,3 +135,39 @@ fn gens_readable_on_dense_without_mutation() {
     assert_eq!(dump.tree_gen(1), Some(0));
     assert_eq!(dump.record_gen(2), None);
 }
+
+
+#[test]
+fn set_overwrites_existing_field_in_place() {
+    let mut c = FonCollection::new();
+    c.add("width", FonValue::Int(10));
+    c.add("name", FonValue::String("a".to_string()));
+    let len_before = c.len();
+
+    c.set("width", FonValue::Int(20)).expect("set existing key");
+
+    assert_eq!(c.len(), len_before); // no field added/removed
+    assert!(matches!(c.get("width"), Some(FonValue::Int(20))));
+    // Setting an absent key errors (use add_field to create).
+    assert!(c.set("missing", FonValue::Int(0)).is_err());
+}
+
+#[test]
+fn add_field_appends_new_key_and_rejects_duplicates() {
+    let mut c = FonCollection::new();
+    c.add_field("a", FonValue::Int(1)).expect("add new key");
+    assert!(matches!(c.get("a"), Some(FonValue::Int(1))));
+    assert!(c.add_field("a", FonValue::Int(2)).is_err()); // duplicate
+}
+
+#[test]
+fn remove_field_drops_key() {
+    let mut c = FonCollection::new();
+    c.add("a", FonValue::Int(1));
+    c.add("b", FonValue::Int(2));
+
+    assert!(c.remove_field("a"));
+    assert!(c.get("a").is_none());
+    assert!(matches!(c.get("b"), Some(FonValue::Int(2))));
+    assert!(!c.remove_field("a")); // already gone
+}

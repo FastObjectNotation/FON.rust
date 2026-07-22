@@ -98,6 +98,43 @@ impl FonCollection {
     }
 
 
+    /// Overwrite the value of an existing key in place. Errors if the key is absent — use
+    /// `add_field` to create a new field. This does not change the field count, so it never
+    /// reallocates the backing vector.
+    pub fn set(&mut self, key: &str, value: FonValue) -> Result<(), FonError> {
+        match self.data.iter_mut().find(|(k, _)| k.as_ref() == key) {
+            Some((_, v)) => {
+                *v = value;
+                Ok(())
+            }
+            None => Err(FonError::InvalidArgument(format!("no field '{key}' to set"))),
+        }
+    }
+
+
+    /// Append a new field. Errors if the key already exists — use `set` to overwrite.
+    pub fn add_field(&mut self, key: impl Into<Arc<str>>, value: FonValue) -> Result<(), FonError> {
+        let key: Arc<str> = key.into();
+        if self.data.iter().any(|(k, _)| k.as_ref() == key.as_ref()) {
+            return Err(FonError::InvalidArgument(format!("field '{key}' already exists")));
+        }
+        self.data.push((key, value));
+        Ok(())
+    }
+
+
+    /// Remove a field. Returns `false` if the key was absent. Removes the first match only
+    /// (keys are expected unique; `add_field`/`set` maintain that).
+    pub fn remove_field(&mut self, key: &str) -> bool {
+        if let Some(pos) = self.data.iter().position(|(k, _)| k.as_ref() == key) {
+            self.data.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+
     pub fn len(&self) -> usize {
         self.data.len()
     }
