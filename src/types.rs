@@ -154,7 +154,7 @@ impl FonCollection {
 // A record cell in a mutable store. `value == None` is a tombstone: a removed record
 // or an unfilled gap. The record is boxed so growing the slot vector never moves a live
 // record — borrowed pointers into a live record survive any add/remove.
-struct Slot {
+pub struct Slot {
     record_gen: u32,
     tree_gen: u32,
     value: Option<Box<FonCollection>>,
@@ -247,6 +247,9 @@ impl FonDump {
                 if idx < slots.len() {
                     let slot = &mut slots[idx];
                     if slot.value.is_none() {
+                        // Tombstone refill: no need to bump `record_gen` here, `remove`
+                        // already bumped it when the tombstone was created, so any
+                        // pre-removal view is already stale.
                         *live += 1;
                     } else {
                         slot.record_gen = slot.record_gen.wrapping_add(1);
