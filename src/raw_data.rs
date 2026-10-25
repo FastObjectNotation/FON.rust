@@ -135,18 +135,18 @@ impl RawData {
             return Ok(self);
         }
 
+        // `pack` writes whole 5-character groups plus, for padded input, one trailing
+        // digit '1'..'3'. The length alone tells whether that digit is present: a full
+        // group may itself end in '1'..'3'.
         let bytes = self.encoded.as_bytes();
-        let mut len = bytes.len();
-        if len == 0 {
-            return Ok(self);
-        }
-
-        let mut padding: usize = 0;
-        let last = bytes[len - 1];
-        if (b'1'..=b'3').contains(&last) {
-            padding = (last - b'0') as usize;
-            len -= 1;
-        }
+        let total: usize = bytes.len();
+        let (len, padding): (usize, usize) = match total % 5 {
+            0 => (total, 0),
+            1 if total > 1 && (b'1'..=b'3').contains(&bytes[total - 1]) => {
+                (total - 1, (bytes[total - 1] - b'0') as usize)
+            }
+            _ => return Err(FonError::Parse(format!("Invalid Z85 length {total}"))),
+        };
 
         let output_len = (len / 5) * 4 - padding;
         let mut out = vec![0u8; output_len];
@@ -154,7 +154,7 @@ impl RawData {
 
         let mut i = 0;
         while i < len {
-            let mut value: u32 = 0;
+            let mut value: u64 = 0;
             for j in 0..5 {
                 let c = bytes[i + j];
                 if !(32..=127).contains(&c) {
@@ -164,8 +164,12 @@ impl RawData {
                 if decoded == 255 {
                     return Err(FonError::Parse("Invalid Z85 character".into()));
                 }
-                value = value.wrapping_mul(85).wrapping_add(decoded as u32);
+                value = value * 85 + u64::from(decoded);
             }
+            let value: u32 = match u32::try_from(value) {
+                Ok(v) => v,
+                Err(_) => return Err(FonError::Parse("Z85 group exceeds 32 bits".into())),
+            };
 
             if write_pos < output_len {
                 out[write_pos] = ((value >> 24) & 0xFF) as u8;

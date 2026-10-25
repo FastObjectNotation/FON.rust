@@ -356,6 +356,9 @@ impl FonDump {
     /// if there was none (not an error). Other records keep their ids — removal never
     /// shifts neighbours.
     pub fn remove(&mut self, id: u64) -> bool {
+        if self.get(id).is_none() {
+            return false;
+        }
         self.ensure_mutable();
         match &mut self.store {
             FonDumpStore::Slab { slots, live } => {
@@ -388,7 +391,6 @@ impl FonDump {
     /// Remove every id in `ids`, returning how many live records were actually removed
     /// (absent or duplicate ids don't count).
     pub fn remove_many(&mut self, ids: &[u64]) -> usize {
-        self.ensure_mutable();
         let mut removed = 0;
         for &id in ids {
             if self.remove(id) {
@@ -403,6 +405,9 @@ impl FonDump {
     /// (use `add` to create). Bumps the record's generation so borrowed views of the old
     /// record become stale.
     pub fn replace(&mut self, id: u64, collection: FonCollection) -> Result<(), FonError> {
+        if self.get(id).is_none() {
+            return Err(FonError::InvalidArgument(format!("no record with id {id} to replace")));
+        }
         self.ensure_mutable();
         let slot = match &mut self.store {
             FonDumpStore::Slab { slots, .. } => slots.get_mut(id as usize),
@@ -457,8 +462,12 @@ impl FonDump {
 
     /// Bump the field-tree generation for the record at `id` after a field-level mutation
     /// somewhere in its tree. Returns `false` if there is no live record. Promotes
-    /// `Dense → Slab` so the counter has somewhere to live.
+    /// `Dense → Slab` so the counter has somewhere to live; an absent id leaves the store
+    /// as it is.
     pub fn bump_tree_gen(&mut self, id: u64) -> bool {
+        if self.get(id).is_none() {
+            return false;
+        }
         self.ensure_mutable();
         let slot = match &mut self.store {
             FonDumpStore::Slab { slots, .. } => slots.get_mut(id as usize),
@@ -551,5 +560,25 @@ impl<'a> Iterator for FonDumpIter<'a> {
             FonDumpIter::Slab(it) => (0, it.size_hint().1),
             FonDumpIter::Sparse(it) => (0, it.size_hint().1),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{FonCollection, FonDump, FonDumpStore};
+
+
+    #[test]
+    fn absent_ids_leave_a_dense_store_dense() {
+        let mut dump: FonDump = FonDump::from_records(vec![FonCollection::new(), FonCollection::new()]);
+        assert!(!dump.remove(7));
+        assert_eq!(dump.remove_many(&[7, 8]), 0);
+        assert!(dump.replace(7, FonCollection::new()).is_err());
+        assert!(!dump.bump_tree_gen(7));
+        assert!(matches!(dump.store, FonDumpStore::Dense(_)));
+
+        assert!(dump.bump_tree_gen(1));
+        assert!(matches!(dump.store, FonDumpStore::Slab { .. }));
     }
 }
