@@ -21,46 +21,45 @@ pub(super) fn find_value_end(data: &[u8]) -> usize {
 
 
 pub(super) fn find_closing_bracket(data: &[u8]) -> Result<usize, FonError> {
-    let mut depth: i32 = 0;
-    let mut in_string = false;
-
-    for i in 0..data.len() {
-        let c = data[i];
-        if c == b'"' && (i == 0 || data[i - 1] != b'\\') {
-            in_string = !in_string;
-        } else if !in_string {
-            if c == b'[' {
-                depth += 1;
-            } else if c == b']' {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(i);
-                }
-            }
-        }
-    }
-    Err(FonError::Parse("Closing bracket not found".into()))
+    find_closing(data, b'[', b']')
+        .ok_or_else(|| FonError::Parse("Closing bracket not found".into()))
 }
 
 
 pub(super) fn find_closing_brace(data: &[u8]) -> Result<usize, FonError> {
+    find_closing(data, b'{', b'}')
+        .ok_or_else(|| FonError::Parse("Closing brace not found".into()))
+}
+
+
+// Index of the delimiter that closes the first `open` at `data[0]`. Brackets inside
+// a quoted string are ignored; inside a string a backslash escapes exactly the next
+// byte, so `"C:\\"` closes after the second backslash instead of the quote being
+// treated as escaped.
+fn find_closing(data: &[u8], open: u8, close: u8) -> Option<usize> {
     let mut depth: i32 = 0;
     let mut in_string = false;
+    let mut escaped = false;
 
-    for i in 0..data.len() {
-        let c = data[i];
-        if c == b'"' && (i == 0 || data[i - 1] != b'\\') {
-            in_string = !in_string;
-        } else if !in_string {
-            if c == b'{' {
-                depth += 1;
-            } else if c == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(i);
-                }
+    for (i, &c) in data.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        } else if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
             }
         }
     }
-    Err(FonError::Parse("Closing brace not found".into()))
+    None
 }

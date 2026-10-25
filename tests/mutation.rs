@@ -33,6 +33,103 @@ fn ensure_mutable_preserves_records_and_ids() {
     assert_eq!(id_of(dump.get(2).unwrap()), 12);
 }
 
+
+// Dense, Slab with tombstones, and Sparse dumps, each with ids stored in the record
+// so `nth` results can be checked against the plain `next` walk.
+fn store_variants() -> Vec<(&'static str, FonDump)> {
+    let dense = FonDump::from_records((0..10).map(record).collect());
+
+    let mut slab = FonDump::from_records((0..10).map(record).collect());
+    slab.ensure_mutable();
+    slab.remove(2);
+    slab.remove(5);
+    slab.remove(9);
+
+    let mut sparse = FonDump::new();
+    sparse.add(5, record(5));
+    sparse.add(0, record(0));
+    sparse.add(10, record(10));
+    sparse.add(11, record(11));
+    sparse.add(100, record(100));
+    sparse.remove(10);
+
+    vec![("dense", dense), ("slab", slab), ("sparse", sparse)]
+}
+
+
+#[test]
+fn nth_matches_next_walk_on_every_store() {
+    for (name, dump) in store_variants() {
+        let walked: Vec<(u64, i32)> = dump.iter().map(|(id, c)| (id, id_of(c))).collect();
+        for k in 0..=walked.len() + 1 {
+            let got = dump.iter().nth(k).map(|(id, c)| (id, id_of(c)));
+            assert_eq!(got, walked.get(k).copied(), "store {name}, nth({k})");
+        }
+    }
+}
+
+
+#[test]
+fn nth_then_next_continues_the_walk() {
+    for (name, dump) in store_variants() {
+        let walked: Vec<u64> = dump.iter().map(|(id, _)| id).collect();
+        let mut it = dump.iter();
+        let mut seen = Vec::new();
+        if let Some((id, _)) = it.nth(1) {
+            seen.push(id);
+        }
+        for (id, _) in it {
+            seen.push(id);
+        }
+        assert_eq!(seen, walked[1..].to_vec(), "store {name}");
+    }
+}
+
+
+#[test]
+fn size_hint_is_exact_for_dense_and_a_valid_bound_otherwise() {
+    let dense = FonDump::from_records((0..10).map(record).collect());
+    assert_eq!(dense.iter().size_hint(), (10, Some(10)));
+
+    for (name, dump) in store_variants() {
+        let live = dump.iter().count();
+        let (lower, upper) = dump.iter().size_hint();
+        assert!(lower <= live, "store {name}");
+        assert!(upper.is_none_or(|u| u >= live), "store {name}");
+    }
+}
+
+
+#[test]
+fn clone_is_deep() {
+    let mut inner = FonCollection::new();
+    inner.add("x", FonValue::Int(1));
+
+    let mut original = FonCollection::new();
+    original.add("n", FonValue::Int(1));
+    original.add("inner", FonValue::Object(Box::new(inner)));
+    original.add("tags", FonValue::StringArray(vec!["a".into()]));
+
+    let mut copy = original.clone();
+    copy.set("n", FonValue::Int(2)).unwrap();
+    if let Some(FonValue::Object(o)) = copy.get_mut("inner") {
+        o.set("x", FonValue::Int(9)).unwrap();
+    }
+    if let Some(FonValue::StringArray(v)) = copy.get_mut("tags") {
+        v.push("b".into());
+    }
+
+    assert!(matches!(original.get("n"), Some(FonValue::Int(1))));
+    match original.get("inner") {
+        Some(FonValue::Object(o)) => assert!(matches!(o.get("x"), Some(FonValue::Int(1)))),
+        _ => panic!("expected nested object"),
+    }
+    match original.get("tags") {
+        Some(FonValue::StringArray(v)) => assert_eq!(v.len(), 1),
+        _ => panic!("expected string array"),
+    }
+}
+
 #[test]
 fn add_after_promotion_appends_contiguously() {
     let mut dump = FonDump::from_records(vec![record(0), record(1)]);
@@ -158,6 +255,20 @@ fn add_field_appends_new_key_and_rejects_duplicates() {
     c.add_field("a", FonValue::Int(1)).expect("add new key");
     assert!(matches!(c.get("a"), Some(FonValue::Int(1))));
     assert!(c.add_field("a", FonValue::Int(2)).is_err()); // duplicate
+}
+
+#[test]
+fn add_field_rejects_keys_that_cannot_round_trip() {
+    let mut c = FonCollection::new();
+    for key in ["a=b", "a\"b", "a{b", "a}b", "a[b", "a]b", "a\nb", "a\rb"] {
+        assert!(c.add_field(key, FonValue::Int(1)).is_err(), "key {key:?} accepted");
+    }
+    assert!(c.is_empty());
+    // Everything else is allowed, including U+0000, commas and colons.
+    c.add_field("a\0b,c:d", FonValue::Int(1)).expect("plain key");
+    let line = fon::serialize_to_string(&c);
+    let back = fon::deserialize_line(line.as_bytes(), &fon::DeserializeOptions::default()).unwrap();
+    assert!(matches!(back.get("a\0b,c:d"), Some(FonValue::Int(1))));
 }
 
 #[test]

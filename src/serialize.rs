@@ -6,6 +6,7 @@ use std::path::Path;
 use rayon::prelude::*;
 
 use crate::error::FonError;
+use crate::pool;
 use crate::types::{FonCollection, FonDump, FonValue};
 
 
@@ -16,14 +17,16 @@ pub fn serialize_to_string(collection: &FonCollection) -> String {
 }
 
 
-pub fn serialize_dump_lines(dump: &FonDump, _max_threads: i32) -> Vec<String> {
+pub fn serialize_dump_lines(dump: &FonDump, max_threads: i32) -> Vec<String> {
     let mut entries: Vec<(u64, &FonCollection)> = dump.iter().collect();
     entries.sort_by_key(|(id, _)| *id);
 
-    entries
-        .par_iter()
-        .map(|(_, c)| serialize_to_string(c))
-        .collect()
+    pool::run(max_threads, || {
+        entries
+            .par_iter()
+            .map(|(_, c)| serialize_to_string(c))
+            .collect()
+    })
 }
 
 

@@ -1,6 +1,8 @@
 //! Leaf value parsing: numbers (via the `atoi` crate for integers, std for
 //! floats), numeric arrays, and quoted strings.
 
+use memchr::memchr2;
+
 use crate::error::FonError;
 
 use super::as_str;
@@ -85,22 +87,39 @@ pub(super) fn parse_number_array<T: NumParse>(data: &[u8]) -> Result<(Vec<T>, us
 }
 
 
+// Decode the four hex digits of a `\uXXXX` escape. Surrogate code points and
+// anything that is not exactly four hex digits yield `None`.
+fn decode_unicode_escape(hex: &[u8]) -> Option<char> {
+    let mut code: u32 = 0;
+    for &b in hex {
+        let digit = (b as char).to_digit(16)?;
+        code = code * 16 + digit;
+    }
+    char::from_u32(code)
+}
+
+
 pub(super) fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
     if data[0] != b'"' {
         return Err(FonError::Parse("String must start with '\"'".into()));
     }
 
+    // SIMD-scan to the next quote or backslash. A backslash escapes exactly the
+    // next byte, so an escaped quote never closes the string.
     let mut end_quote = 1;
     let mut has_escape = false;
-    while end_quote < data.len() {
-        let b = data[end_quote];
-        if b == b'"' && data[end_quote - 1] != b'\\' {
-            break;
+    loop {
+        match memchr2(b'"', b'\\', &data[end_quote..]) {
+            Some(rel) => {
+                end_quote += rel;
+                if data[end_quote] == b'"' {
+                    break;
+                }
+                has_escape = true;
+                end_quote = (end_quote + 2).min(data.len());
+            }
+            None => return Err(FonError::Parse("Unterminated string".into())),
         }
-        if b == b'\\' {
-            has_escape = true;
-        }
-        end_quote += 1;
     }
 
     let content = &data[1..end_quote];
@@ -128,6 +147,16 @@ pub(super) fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
                 b't' => bytes.push(b'\t'),
                 b'b' => bytes.push(b'\x08'),
                 b'f' => bytes.push(b'\x0C'),
+                b'u' => {
+                    let hex = content
+                        .get(i + 1..i + 5)
+                        .ok_or_else(|| FonError::Parse("Malformed \\u escape in string".into()))?;
+                    let ch = decode_unicode_escape(hex)
+                        .ok_or_else(|| FonError::Parse("Malformed \\u escape in string".into()))?;
+                    let mut utf8 = [0u8; 4];
+                    bytes.extend_from_slice(ch.encode_utf8(&mut utf8).as_bytes());
+                    i += 4;
+                }
                 other => bytes.push(other),
             }
         } else {

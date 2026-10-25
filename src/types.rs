@@ -68,6 +68,21 @@ impl FonValue {
 }
 
 
+/// Checks that `key` can be written to the wire format. Keys are not escaped, so a key
+/// containing `=`, `"`, `{`, `}`, `[`, `]`, `\n` or `\r` would produce a line that does
+/// not parse back to the same record. `FonCollection::add_field` applies this check;
+/// the unchecked `add` (used by the parser) does not.
+pub fn validate_key(key: &str) -> Result<(), FonError> {
+    match key.bytes().find(|b| matches!(b, b'=' | b'"' | b'{' | b'}' | b'[' | b']' | b'\n' | b'\r')) {
+        Some(b) => Err(FonError::InvalidArgument(format!(
+            "key '{key}' contains the reserved character {:?}",
+            b as char
+        ))),
+        None => Ok(()),
+    }
+}
+
+
 // Records have a handful of fields, so a flat Vec beats a per-record HashMap:
 // far fewer allocations on the parse hot path, and `get` is a short linear scan.
 // Keys are `Arc<str>` so a repeated key (every record shares the same field
@@ -116,6 +131,7 @@ impl FonCollection {
     /// Append a new field. Errors if the key already exists — use `set` to overwrite.
     pub fn add_field(&mut self, key: impl Into<Arc<str>>, value: FonValue) -> Result<(), FonError> {
         let key: Arc<str> = key.into();
+        validate_key(&key)?;
         if self.data.iter().any(|(k, _)| k.as_ref() == key.as_ref()) {
             return Err(FonError::InvalidArgument(format!("field '{key}' already exists")));
         }
@@ -508,6 +524,32 @@ impl<'a> Iterator for FonDumpIter<'a> {
                 }
                 None
             }
+        }
+    }
+
+
+    // Dense slots are all live, so skipping delegates to the O(1) slice skip. Slab
+    // and Sparse have tombstones, so they must walk the live records to skip.
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        match self {
+            FonDumpIter::Dense(it) => it.nth(n).map(|(i, c)| (i as u64, c)),
+            _ => {
+                for _ in 0..n {
+                    self.next()?;
+                }
+                self.next()
+            }
+        }
+    }
+
+
+    // Dense is exact. Slab and Sparse can yield fewer items than their slot count
+    // (tombstones), so the lower bound stays 0.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            FonDumpIter::Dense(it) => it.size_hint(),
+            FonDumpIter::Slab(it) => (0, it.size_hint().1),
+            FonDumpIter::Sparse(it) => (0, it.size_hint().1),
         }
     }
 }

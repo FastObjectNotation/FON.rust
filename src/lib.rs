@@ -9,6 +9,8 @@ pub mod raw_data;
 pub mod serialize;
 pub mod types;
 
+mod pool;
+
 
 pub use deserialize::{
     deserialize_dump_from_bytes, deserialize_from_file, deserialize_line, DeserializeOptions,

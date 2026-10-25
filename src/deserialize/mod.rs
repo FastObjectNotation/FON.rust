@@ -13,6 +13,7 @@ use memchr::memchr2;
 use rayon::prelude::*;
 
 use crate::error::FonError;
+use crate::pool;
 use crate::types::{FonCollection, FonDump};
 
 mod record;
@@ -51,7 +52,7 @@ pub fn deserialize_from_file(
 
 pub fn deserialize_dump_from_bytes(
     content: &[u8],
-    _max_threads: i32,
+    max_threads: i32,
     opts: &DeserializeOptions,
 ) -> Result<FonDump, FonError> {
     // Strip a UTF-8 BOM once so it never glues onto the first key.
@@ -73,13 +74,15 @@ pub fn deserialize_dump_from_bytes(
     // to stay cache-resident and to give Rayon plenty of work items to balance
     // uneven records across cores, but never fewer than the thread count.
     const TARGET_CHUNK: usize = 1 << 20;
-    let workers = rayon::current_num_threads().max(1);
-    let chunk_count = (content.len() / TARGET_CHUNK).max(workers);
-    let bounds = chunk_bounds(content, chunk_count);
-    let parts: Vec<Result<Vec<FonCollection>, FonError>> = bounds
-        .par_iter()
-        .map(|&(start, end)| parse_chunk(&content[start..end], opts))
-        .collect();
+    let parts: Vec<Result<Vec<FonCollection>, FonError>> = pool::run(max_threads, || {
+        let workers = rayon::current_num_threads().max(1);
+        let chunk_count = (content.len() / TARGET_CHUNK).max(workers);
+        let bounds = chunk_bounds(content, chunk_count);
+        bounds
+            .par_iter()
+            .map(|&(start, end)| parse_chunk(&content[start..end], opts))
+            .collect()
+    });
 
     let mut records: Vec<FonCollection> = Vec::with_capacity(content.len() / 64);
     for part in parts {
