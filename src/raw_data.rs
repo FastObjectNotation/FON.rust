@@ -16,6 +16,7 @@ const Z85_DECODE: [u8; 96] = [
 ];
 
 
+#[derive(Clone)]
 pub struct RawData {
     data: Vec<u8>,
     encoded: String,

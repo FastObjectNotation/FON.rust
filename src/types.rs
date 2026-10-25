@@ -19,6 +19,7 @@ pub const TYPE_RAW: u8 = b'r';
 pub const TYPE_OBJECT: u8 = b'o';
 
 
+#[derive(Clone)]
 pub enum FonValue {
     Byte(u8),
     Short(i16),
@@ -71,7 +72,7 @@ impl FonValue {
 // far fewer allocations on the parse hot path, and `get` is a short linear scan.
 // Keys are `Arc<str>` so a repeated key (every record shares the same field
 // names) is interned once and reused via cheap clones.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FonCollection {
     data: Vec<(Arc<str>, FonValue)>,
 }
@@ -219,7 +220,6 @@ impl FonDump {
         match &mut self.store {
             FonDumpStore::Dense(v) if id as usize == v.len() => {
                 v.push(collection);
-                return;
             }
             FonDumpStore::Dense(_) => {
                 // Non-contiguous add into a dense store: promote to sparse (historic behavior).
@@ -235,16 +235,13 @@ impl FonDump {
                 };
                 sparse_insert(&mut map, &mut live, id, collection);
                 self.store = FonDumpStore::Sparse { map, live };
-                return;
             }
             FonDumpStore::Slab { slots, live } => {
                 let idx = id as usize;
                 if idx == slots.len() {
                     slots.push(Slot::occupied(collection));
                     *live += 1;
-                    return;
-                }
-                if idx < slots.len() {
+                } else if idx < slots.len() {
                     let slot = &mut slots[idx];
                     if slot.value.is_none() {
                         // Tombstone refill: no need to bump `record_gen` here, `remove`
@@ -255,22 +252,20 @@ impl FonDump {
                         slot.record_gen = slot.record_gen.wrapping_add(1);
                     }
                     slot.value = Some(Box::new(collection));
-                    return;
+                } else {
+                    // Gap beyond the end: promote to sparse rather than pad unboundedly.
+                    let old = std::mem::take(&mut self.store);
+                    if let FonDumpStore::Slab { slots, live } = old {
+                        let mut map: HashMap<u64, Slot> =
+                            slots.into_iter().enumerate().map(|(i, s)| (i as u64, s)).collect();
+                        let mut live = live;
+                        sparse_insert(&mut map, &mut live, id, collection);
+                        self.store = FonDumpStore::Sparse { map, live };
+                    }
                 }
-                // Gap beyond the end: promote to sparse rather than pad unboundedly.
-                let old = std::mem::take(&mut self.store);
-                if let FonDumpStore::Slab { slots, live } = old {
-                    let mut map: HashMap<u64, Slot> =
-                        slots.into_iter().enumerate().map(|(i, s)| (i as u64, s)).collect();
-                    let mut live = live;
-                    sparse_insert(&mut map, &mut live, id, collection);
-                    self.store = FonDumpStore::Sparse { map, live };
-                }
-                return;
             }
             FonDumpStore::Sparse { map, live } => {
                 sparse_insert(map, live, id, collection);
-                return;
             }
         }
     }
