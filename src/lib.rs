@@ -14,6 +14,7 @@ mod pool;
 
 pub use deserialize::{
     deserialize_dump_from_bytes, deserialize_from_file, deserialize_line, DeserializeOptions,
+    MAX_NESTING_DEPTH,
 };
 pub use error::FonError;
 pub use raw_data::RawData;

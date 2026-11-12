@@ -11,49 +11,87 @@ use crate::types::{FonCollection, FonDump, FonValue};
 
 
 pub fn serialize_to_string(collection: &FonCollection) -> String {
-    let mut out = String::with_capacity(4096);
+    let mut out = String::new();
     serialize_body(&mut out, collection);
     out
 }
 
 
-pub fn serialize_dump_lines(dump: &FonDump, max_threads: i32) -> Vec<String> {
+// The live records in ascending id order. Dense and Slab stores already iterate in
+// that order; only a Sparse store needs the sort.
+fn ordered_records(dump: &FonDump) -> Vec<&FonCollection> {
     let mut entries: Vec<(u64, &FonCollection)> = dump.iter().collect();
-    entries.sort_by_key(|(id, _)| *id);
+    if !entries.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+        entries.sort_unstable_by_key(|(id, _)| *id);
+    }
+    entries.into_iter().map(|(_, c)| c).collect()
+}
+
+
+// One string per record, each sized to its text.
+pub fn serialize_dump_lines(dump: &FonDump, max_threads: i32) -> Vec<String> {
+    let records: Vec<&FonCollection> = ordered_records(dump);
 
     pool::run(max_threads, || {
-        entries
+        records
             .par_iter()
-            .map(|(_, c)| serialize_to_string(c))
+            .map_init(String::new, |scratch, c| {
+                scratch.clear();
+                serialize_body(scratch, c);
+                scratch.as_str().to_owned()
+            })
+            .collect()
+    })
+}
+
+
+// The dump text as a list of blocks, each holding a run of whole lines. Records are
+// written straight into a block, so no per-record string is allocated.
+fn serialize_dump_blocks(dump: &FonDump, max_threads: i32) -> Vec<String> {
+    const MIN_BLOCK: usize = 64;
+    const MAX_BLOCK: usize = 4096;
+    let records: Vec<&FonCollection> = ordered_records(dump);
+
+    pool::run(max_threads, || {
+        let workers = rayon::current_num_threads().max(1);
+        let block: usize = (records.len() / (workers * 8)).clamp(MIN_BLOCK, MAX_BLOCK);
+        records
+            .par_chunks(block)
+            .map(|part| {
+                let mut out = String::new();
+                for c in part {
+                    serialize_body(&mut out, c);
+                    out.push('\n');
+                }
+                out
+            })
             .collect()
     })
 }
 
 
 pub fn serialize_dump_to_string(dump: &FonDump, max_threads: i32) -> String {
-    let lines = serialize_dump_lines(dump, max_threads);
-    let total: usize = lines.iter().map(|l| l.len() + 1).sum();
+    let blocks: Vec<String> = serialize_dump_blocks(dump, max_threads);
+    let total: usize = blocks.iter().map(String::len).sum();
     let mut out = String::with_capacity(total);
-    for line in &lines {
-        out.push_str(line);
-        out.push('\n');
+    for block in &blocks {
+        out.push_str(block);
     }
     out
 }
 
 
+/// Write the dump to `path`, replacing its contents. The file is written in place, so
+/// a failure part way leaves a truncated file.
 pub fn serialize_to_file(dump: &FonDump, path: &Path, max_threads: i32) -> Result<(), FonError> {
-    let lines = serialize_dump_lines(dump, max_threads);
+    let blocks: Vec<String> = serialize_dump_blocks(dump, max_threads);
 
     let file = File::create(path)
         .map_err(|e| FonError::Write(format!("Failed to open file for writing: {}", e)))?;
     let mut writer = BufWriter::new(file);
-    for line in &lines {
+    for block in &blocks {
         writer
-            .write_all(line.as_bytes())
-            .map_err(|e| FonError::Write(format!("Write failed: {}", e)))?;
-        writer
-            .write_all(b"\n")
+            .write_all(block.as_bytes())
             .map_err(|e| FonError::Write(format!("Write failed: {}", e)))?;
     }
     writer
@@ -92,17 +130,17 @@ fn serialize_value(out: &mut String, value: &FonValue) {
         FonValue::Bool(v) => out.push(if *v { '1' } else { '0' }),
         FonValue::String(s) => serialize_string(out, s),
         FonValue::Raw(raw) => {
-            out.push('"');
             // Raw is logically lazy-encoded: emit the encoded form if already
-            // packed, otherwise pack a copy (we only borrow `raw` here).
+            // packed, otherwise pack a copy (we only borrow `raw` here). Packed text
+            // came from the caller or from the input and was never checked, so it is
+            // written like any string: whatever it holds, the line stays parseable.
             if raw.is_packed() {
-                out.push_str(raw.encoded());
-            } else if raw.is_unpacked() {
+                serialize_string(out, raw.encoded());
+            } else {
                 let mut tmp = crate::raw_data::RawData::from_bytes(raw.data().to_vec());
                 tmp.pack();
-                out.push_str(tmp.encoded());
+                serialize_string(out, tmp.encoded());
             }
-            out.push('"');
         }
         FonValue::Object(child) => {
             out.push('{');
@@ -220,6 +258,12 @@ fn serialize_double(out: &mut String, v: f64) {
 
 fn serialize_string(out: &mut String, s: &str) {
     out.push('"');
+    // Most strings need no escaping; copy those in one go.
+    if !s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20) {
+        out.push_str(s);
+        out.push('"');
+        return;
+    }
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),

@@ -1,6 +1,9 @@
 //! Recursive-descent parsing of one record (a line) into a `FonCollection`,
 //! including nested objects and object arrays.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use crate::error::FonError;
 use crate::raw_data::RawData;
 use crate::types::{
@@ -8,11 +11,22 @@ use crate::types::{
     TYPE_OBJECT, TYPE_RAW, TYPE_SHORT, TYPE_STRING, TYPE_UINT, TYPE_ULONG,
 };
 
-use super::scalar::{parse_bool_array, parse_num, parse_number_array, parse_string, parse_string_array};
-use super::scan::{find_byte, find_closing_brace, find_closing_bracket, find_value_end};
-use super::{as_str, intern, DeserializeOptions, KeyInterner};
+use super::scalar::{
+    after_separator, parse_bool, parse_bool_array, parse_num, parse_number_array, parse_string,
+    parse_string_array,
+};
+use super::scan::{find_byte, find_closing_brace, find_closing_bracket, token_end};
+use super::{as_str, DeserializeOptions, KeyInterner};
 
 
+// Above this many fields the duplicate-key check switches from a linear scan to a set,
+// so a very wide record stays linear to parse.
+const WIDE_RECORD: usize = 32;
+
+
+// Parse `key=type:value` pairs separated by single commas. An empty `line` is an
+// empty collection. Anything else must be made of complete pairs: text with no `=`,
+// a doubled or trailing comma and a repeated key are errors.
 pub(super) fn parse_collection_body<'a>(
     line: &'a [u8],
     depth: i32,
@@ -20,19 +34,26 @@ pub(super) fn parse_collection_body<'a>(
     interner: &mut KeyInterner<'a>,
 ) -> Result<FonCollection, FonError> {
     let mut collection = FonCollection::new();
+    let mut seen: Option<HashSet<usize>> = None;
     let mut pos = 0;
 
     while pos < line.len() {
         let eq_pos = match find_byte(&line[pos..], b'=') {
             Some(p) => pos + p,
-            None => break,
+            None => {
+                return Err(FonError::Parse(
+                    "Invalid format: expected key=type:value".into(),
+                ));
+            }
         };
 
-        let key_str = as_str(&line[pos..eq_pos]);
-        let key = intern(interner, key_str);
+        let key: Arc<str> = interner.intern(as_str(&line[pos..eq_pos]))?;
+        if is_repeated(&collection, &mut seen, &key) {
+            return Err(FonError::Parse(format!("Duplicate key '{key}'")));
+        }
         pos = eq_pos + 1;
 
-        if pos >= line.len() || pos + 1 >= line.len() || line[pos + 1] != b':' {
+        if pos + 1 >= line.len() || line[pos + 1] != b':' {
             return Err(FonError::Parse(
                 "Invalid format: expected type:value".into(),
             ));
@@ -46,8 +67,8 @@ pub(super) fn parse_collection_body<'a>(
         collection.add(key, value);
         pos += consumed;
 
-        if pos < line.len() && line[pos] == b',' {
-            pos += 1;
+        if pos < line.len() {
+            pos = after_separator(line, pos)?;
         }
     }
 
@@ -55,6 +76,21 @@ pub(super) fn parse_collection_body<'a>(
 }
 
 
+// Keys are interned, so two fields with the same key share one allocation and the
+// check is a pointer comparison.
+fn is_repeated(collection: &FonCollection, seen: &mut Option<HashSet<usize>>, key: &Arc<str>) -> bool {
+    let address = |k: &Arc<str>| -> usize { Arc::as_ptr(k) as *const u8 as usize };
+    if collection.len() < WIDE_RECORD {
+        return collection.iter().any(|(existing, _)| Arc::ptr_eq(existing, key));
+    }
+    let set: &mut HashSet<usize> =
+        seen.get_or_insert_with(|| collection.iter().map(|(existing, _)| address(existing)).collect());
+    !set.insert(address(key))
+}
+
+
+// Parse one value at the start of `data`. Returns the value and its length; the
+// separator that follows is left for the caller.
 fn parse_value<'a>(
     data: &'a [u8],
     type_char: u8,
@@ -116,23 +152,19 @@ fn parse_value<'a>(
         return Ok((FonValue::Raw(Box::new(raw)), consumed));
     }
 
-    let end = find_value_end(data);
-    let num = &data[..end];
-    let mut consumed = end;
-    if consumed < data.len() && data[consumed] == b',' {
-        consumed += 1;
-    }
+    let consumed: usize = token_end(data);
+    let token = &data[..consumed];
 
     let value = match type_char {
-        TYPE_BYTE => FonValue::Byte(parse_num::<u8>(num)?),
-        TYPE_SHORT => FonValue::Short(parse_num::<i16>(num)?),
-        TYPE_INT => FonValue::Int(parse_num::<i32>(num)?),
-        TYPE_UINT => FonValue::UInt(parse_num::<u32>(num)?),
-        TYPE_LONG => FonValue::Long(parse_num::<i64>(num)?),
-        TYPE_ULONG => FonValue::ULong(parse_num::<u64>(num)?),
-        TYPE_FLOAT => FonValue::Float(parse_num::<f32>(num)?),
-        TYPE_DOUBLE => FonValue::Double(parse_num::<f64>(num)?),
-        TYPE_BOOL => FonValue::Bool(data[0] != b'0'),
+        TYPE_BYTE => FonValue::Byte(parse_num::<u8>(token)?),
+        TYPE_SHORT => FonValue::Short(parse_num::<i16>(token)?),
+        TYPE_INT => FonValue::Int(parse_num::<i32>(token)?),
+        TYPE_UINT => FonValue::UInt(parse_num::<u32>(token)?),
+        TYPE_LONG => FonValue::Long(parse_num::<i64>(token)?),
+        TYPE_ULONG => FonValue::ULong(parse_num::<u64>(token)?),
+        TYPE_FLOAT => FonValue::Float(parse_num::<f32>(token)?),
+        TYPE_DOUBLE => FonValue::Double(parse_num::<f64>(token)?),
+        TYPE_BOOL => FonValue::Bool(parse_bool(token)?),
         _ => return Err(FonError::Parse("Unknown type".into())),
     };
 
@@ -146,10 +178,10 @@ fn parse_object<'a>(
     opts: &DeserializeOptions,
     interner: &mut KeyInterner<'a>,
 ) -> Result<(Box<FonCollection>, usize), FonError> {
-    if depth > opts.max_depth {
+    if depth > opts.depth_limit() {
         return Err(FonError::Parse("Maximum nesting depth exceeded".into()));
     }
-    if data[0] != b'{' {
+    if data.first() != Some(&b'{') {
         return Err(FonError::Parse("Object must start with '{'".into()));
     }
 
@@ -158,12 +190,7 @@ fn parse_object<'a>(
 
     let collection = parse_collection_body(body, depth, opts, interner)?;
 
-    let mut consumed = close + 1;
-    if consumed < data.len() && data[consumed] == b',' {
-        consumed += 1;
-    }
-
-    Ok((Box::new(collection), consumed))
+    Ok((Box::new(collection), close + 1))
 }
 
 
@@ -174,10 +201,10 @@ fn parse_object_array<'a>(
     opts: &DeserializeOptions,
     interner: &mut KeyInterner<'a>,
 ) -> Result<(Vec<Box<FonCollection>>, usize), FonError> {
-    if depth > opts.max_depth {
+    if depth > opts.depth_limit() {
         return Err(FonError::Parse("Maximum nesting depth exceeded".into()));
     }
-    if data[0] != b'[' {
+    if data.first() != Some(&b'[') {
         return Err(FonError::Parse("Object array must start with '['".into()));
     }
 
@@ -187,21 +214,18 @@ fn parse_object_array<'a>(
     let mut result: Vec<Box<FonCollection>> = Vec::new();
     let mut pos = 0;
     while pos < content.len() {
-        let remaining = &content[pos..];
-        if remaining[0] != b'{' {
+        if content[pos] != b'{' {
             return Err(FonError::Parse(
                 "Object array element must start with '{'".into(),
             ));
         }
-        let (obj, consumed) = parse_object(remaining, depth, opts, interner)?;
+        let (obj, consumed) = parse_object(&content[pos..], depth, opts, interner)?;
         result.push(obj);
         pos += consumed;
+        if pos < content.len() {
+            pos = after_separator(content, pos)?;
+        }
     }
 
-    let mut total_consumed = close + 1;
-    if total_consumed < data.len() && data[total_consumed] == b',' {
-        total_consumed += 1;
-    }
-
-    Ok((result, total_consumed))
+    Ok((result, close + 1))
 }

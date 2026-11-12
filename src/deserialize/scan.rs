@@ -10,13 +10,10 @@ pub(super) fn find_byte(data: &[u8], target: u8) -> Option<usize> {
 }
 
 
-pub(super) fn find_value_end(data: &[u8]) -> usize {
-    for (i, &c) in data.iter().enumerate() {
-        if c == b',' || c == b']' || c == b'\r' || c == b'\n' {
-            return i;
-        }
-    }
-    data.len()
+// Length of the token at the start of `data`: everything up to the next comma, or all
+// of `data` when there is none. The caller decides whether the token is well formed.
+pub(super) fn token_end(data: &[u8]) -> usize {
+    memchr(b',', data).unwrap_or(data.len())
 }
 
 

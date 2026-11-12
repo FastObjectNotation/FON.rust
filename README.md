@@ -20,7 +20,9 @@ typed and can nest.
 ## Format
 
 Each line is one record: a comma-separated list of `key=type:value` pairs. A
-`.fon` file is a sequence of records, indexed by line number (0-based).
+`.fon` file is a sequence of records, indexed by line number (0-based). An empty
+line is an empty record. A line ends with `\n`, `\r\n` or `\r`; the last line
+needs no terminator.
 
 ```
 name=s:"John",age=i:30,balance=d:1234.56
@@ -53,9 +55,22 @@ objects (`[{...},{...}]`). Bool is written as `0` or `1`; floats may be `nan`,
 `inf` and `-inf`.
 
 Strings are double-quoted and may contain any character, including U+0000. The
-escapes `\n \r \t \b \f \" \\` are used, and every other control character is
-written as `\uXXXX` (for example `\u0000` or `\u001B`). Parsing decodes `\uXXXX`
-as well. Keys are not escaped; see [Editing records](#editing-records).
+escapes `\n \r \t \b \f \" \\` are used, and every other character below U+0020
+is written as `\uXXXX` (for example `\u0000` or `\u001B`). Parsing decodes
+`\uXXXX` as well and rejects any other escape. Keys are not escaped; see
+[Editing records](#editing-records).
+
+Parsing is strict. Text that does not follow the format is an error, never a
+guess:
+
+- An integer must be the whole value: `12abc`, a lone sign and an out-of-range
+  number are errors. A float that overflows (`1e400`) is an error.
+- A bool is exactly `0` or `1`.
+- Pairs and array items are separated by exactly one comma, with no comma after
+  the last one and no spaces around separators (whitespace is part of a key or
+  a value).
+- A key may appear only once in a record.
+- A UTF-8 byte order mark is skipped at the very start of the input only.
 
 ## Install
 
@@ -152,8 +167,8 @@ Collection methods:
   `add_field` for keys that did not come from your own code.
 
 Keys are written without escaping, so a key may not contain `=`, `"`, `{`, `}`,
-`[`, `]`, CR or LF. `fon::types::validate_key` performs this check, and
-`add_field` applies it.
+`[`, `]`, CR or LF, and may not start with `,`. `fon::types::validate_key`
+performs this check; `add_field` and the parser apply it.
 
 Dump methods:
 
@@ -168,7 +183,9 @@ Dump methods:
 
 Ids are stable in memory: removing a record never changes the ids of the
 others. Saving writes the remaining records in ascending id order with no gaps,
-so the ids are renumbered from 0 when the file is loaded again.
+so the ids are renumbered from 0 when the file is loaded again. A removed id
+keeps a small placeholder until the dump is dropped, so a long-lived dump that
+keeps adding new ids and removing old ones grows; save and reload it to compact.
 
 `FonCollection`, `FonValue` and `RawData` implement `Clone`, which makes a deep
 copy. `FonDump` does not implement `Clone`.
@@ -211,12 +228,18 @@ let line = serialize_to_string(&record);
 // blob=r:"?MsJX"
 
 // Defaults: max_depth = 64, unpack_raw = false.
-// `max_depth` bounds {}/[] nesting (too deep -> FonError::Parse).
+// `max_depth` bounds {}/[] nesting (too deep -> FonError::Parse). Values above
+// fon::MAX_NESTING_DEPTH (128) are treated as 128.
 // `unpack_raw: false` keeps a blob as Z85 text (RawData::encoded());
 // `unpack_raw: true` decodes it to bytes during parsing (RawData::data()).
 let opts = DeserializeOptions { max_depth: 32, unpack_raw: true };
 let parsed = deserialize_line(line.as_bytes(), &opts).unwrap();
 ```
+
+A record built through the API can nest deeper than the parser accepts. Such a
+record is written without complaint but cannot be read back, and a tree
+thousands of levels deep can exhaust the stack when it is written, cloned or
+dropped.
 
 The `threads` argument of the serialize and deserialize functions: `0` or a
 negative value uses all cores. A value greater than `0` caps the worker threads
@@ -272,8 +295,9 @@ Functions:
 Other public types: `FonValue` (the value enum; `type_char()` returns its
 code), `RawData` (`from_bytes`, `from_encoded`, `data`, `encoded`, `pack`,
 `unpack`), `DeserializeOptions` (`max_depth`, `unpack_raw`), and `FonError`
-with the variants `Parse`, `Write` and `InvalidArgument`, each carrying a
-message.
+with the variants `Parse`, `Write`, `InvalidArgument` and `Io` (a file that
+could not be read), each carrying a message. A parse error from a dump starts
+with the line number, for example `line 12: Failed to parse number: 'x'`.
 
 ## Build and test
 

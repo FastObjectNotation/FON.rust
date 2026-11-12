@@ -16,7 +16,14 @@ const Z85_DECODE: [u8; 96] = [
 ];
 
 
-#[derive(Clone)]
+/// A binary blob that is held either as bytes (unpacked) or as its Z85 text (packed)
+/// and converted on demand by `pack` and `unpack`. An empty blob is neither.
+///
+/// Only the form that is currently held can be read: `data()` is empty while the value
+/// is packed and `encoded()` is empty while it is unpacked, so check `is_packed()` or
+/// call `unpack()` before reading bytes. Equality compares the held form, so a packed
+/// and an unpacked value with the same content are not equal.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RawData {
     data: Vec<u8>,
     encoded: String,
@@ -32,6 +39,8 @@ impl RawData {
     }
 
 
+    /// Wrap Z85 text without checking it. Text that is not valid Z85 is still written
+    /// out as given and read back as given; it fails only in `unpack`.
     pub fn from_encoded(encoded: String) -> Self {
         Self {
             data: Vec::new(),
@@ -40,11 +49,13 @@ impl RawData {
     }
 
 
+    /// The bytes, or an empty slice while the value is packed.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
 
+    /// The Z85 text, or an empty string while the value is unpacked.
     pub fn encoded(&self) -> &str {
         &self.encoded
     }

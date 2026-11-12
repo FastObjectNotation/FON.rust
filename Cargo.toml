@@ -1,10 +1,13 @@
 [package]
 name = "FastObjectNotation"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Fast Object Notation — a fast, human-readable, line-oriented serialization format"
 license = "MIT"
 repository = "https://github.com/FastObjectNotation/FON.rust"
+readme = "README.md"
+keywords = ["serialization", "parser", "format", "text"]
+categories = ["encoding", "parser-implementations"]
 
 [lib]
 name = "fon"

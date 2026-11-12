@@ -1,12 +1,17 @@
 //! Leaf value parsing: numbers (via the `atoi` crate for integers, std for
 //! floats), numeric arrays, and quoted strings.
+//!
+//! Every parser here consumes exactly one value and reports its length. The
+//! separator after a value belongs to the caller, so a missing, doubled or
+//! trailing comma is an error instead of being absorbed.
 
-use memchr::memchr2;
+use atoi::FromRadix10SignedChecked;
+use memchr::{memchr2, memchr_iter};
 
 use crate::error::FonError;
 
 use super::as_str;
-use super::scan::{find_closing_bracket, find_value_end};
+use super::scan::{find_closing_bracket, token_end};
 
 
 pub(super) fn parse_num<T: NumParse>(bytes: &[u8]) -> Result<T, FonError> {
@@ -30,27 +35,49 @@ fn num_err(bytes: &[u8]) -> FonError {
 }
 
 
+// The whole token must be the number: `12abc`, a lone sign and an empty token are
+// errors. `atoi` alone stops at the first non-digit and reports what it read so far.
 macro_rules! impl_num_parse_int {
     ($($t:ty),+) => {$(
         impl NumParse for $t {
             #[inline]
             fn parse_field(bytes: &[u8]) -> Result<Self, FonError> {
-                atoi::atoi::<$t>(bytes).ok_or_else(|| num_err(bytes))
+                let (value, used): (Option<$t>, usize) = <$t>::from_radix_10_signed_checked(bytes);
+                let sign: usize = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+                match value {
+                    Some(v) if used == bytes.len() && used > sign => Ok(v),
+                    _ => Err(num_err(bytes)),
+                }
             }
         }
     )+};
 }
 
 
+// A token that overflows to infinity (`1e400`) is an error; infinity has to be
+// spelled out (`inf`, `-inf`).
 macro_rules! impl_num_parse_float {
     ($($t:ty),+) => {$(
         impl NumParse for $t {
             #[inline]
             fn parse_field(bytes: &[u8]) -> Result<Self, FonError> {
-                as_str(bytes).parse::<$t>().map_err(|_| num_err(bytes))
+                let value: $t = as_str(bytes).parse::<$t>().map_err(|_| num_err(bytes))?;
+                if value.is_infinite() && !spells_infinity(bytes) {
+                    return Err(num_err(bytes));
+                }
+                Ok(value)
             }
         }
     )+};
+}
+
+
+fn spells_infinity(bytes: &[u8]) -> bool {
+    let unsigned: &[u8] = match bytes.first() {
+        Some(b'+' | b'-') => &bytes[1..],
+        _ => bytes,
+    };
+    matches!(unsigned.first(), Some(b'i' | b'I'))
 }
 
 
@@ -58,32 +85,62 @@ impl_num_parse_int!(u8, u32, u64, i16, i32, i64);
 impl_num_parse_float!(f32, f64);
 
 
-pub(super) fn parse_number_array<T: NumParse>(data: &[u8]) -> Result<(Vec<T>, usize), FonError> {
-    if data[0] != b'[' {
+// The text between the brackets of the array that starts at `data[0]`, plus the
+// length of the whole array including both brackets.
+fn array_content(data: &[u8]) -> Result<(&[u8], usize), FonError> {
+    if data.first() != Some(&b'[') {
         return Err(FonError::Parse("Array must start with '['".into()));
     }
+    let close: usize = find_closing_bracket(data)?;
+    Ok((&data[1..close], close + 1))
+}
 
-    let close = find_closing_bracket(data)?;
-    let content = &data[1..close];
 
-    let mut result: Vec<T> = Vec::with_capacity(content.len() / 4);
-    let mut pos = 0;
-    while pos < content.len() {
-        let remaining = &content[pos..];
-        let end = find_value_end(remaining);
-        result.push(parse_num::<T>(&remaining[..end])?);
-        pos += end;
-        if pos < content.len() && content[pos] == b',' {
-            pos += 1;
+// Split `content` at every comma and hand each token to `parse`. An empty token
+// (doubled or trailing comma) reaches `parse` as an empty slice and fails there.
+fn parse_tokens<T>(
+    content: &[u8],
+    mut parse: impl FnMut(&[u8]) -> Result<T, FonError>,
+) -> Result<Vec<T>, FonError> {
+    if content.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut result: Vec<T> = Vec::with_capacity(memchr_iter(b',', content).count() + 1);
+    let mut pos: usize = 0;
+    loop {
+        let end: usize = pos + token_end(&content[pos..]);
+        result.push(parse(&content[pos..end])?);
+        if end == content.len() {
+            return Ok(result);
         }
+        pos = end + 1;
     }
+}
 
-    let mut total_consumed = close + 1;
-    if total_consumed < data.len() && data[total_consumed] == b',' {
-        total_consumed += 1;
+
+pub(super) fn parse_number_array<T: NumParse>(data: &[u8]) -> Result<(Vec<T>, usize), FonError> {
+    let (content, consumed): (&[u8], usize) = array_content(data)?;
+    let result: Vec<T> = parse_tokens(content, parse_num::<T>)?;
+    Ok((result, consumed))
+}
+
+
+pub(super) fn parse_bool(bytes: &[u8]) -> Result<bool, FonError> {
+    match bytes {
+        b"0" => Ok(false),
+        b"1" => Ok(true),
+        _ => Err(FonError::Parse(format!(
+            "Failed to parse bool (expected 0 or 1): '{}'",
+            String::from_utf8_lossy(bytes)
+        ))),
     }
+}
 
-    Ok((result, total_consumed))
+
+pub(super) fn parse_bool_array(data: &[u8]) -> Result<(Vec<bool>, usize), FonError> {
+    let (content, consumed): (&[u8], usize) = array_content(data)?;
+    let result: Vec<bool> = parse_tokens(content, parse_bool)?;
+    Ok((result, consumed))
 }
 
 
@@ -99,8 +156,10 @@ fn decode_unicode_escape(hex: &[u8]) -> Option<char> {
 }
 
 
+// Parse the quoted string that starts at `data[0]`. Returns the text and the number
+// of bytes consumed, up to and including the closing quote.
 pub(super) fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
-    if data[0] != b'"' {
+    if data.first() != Some(&b'"') {
         return Err(FonError::Parse("String must start with '\"'".into()));
     }
 
@@ -123,15 +182,11 @@ pub(super) fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
     }
 
     let content = &data[1..end_quote];
+    let consumed: usize = end_quote + 1;
 
     // Fast path: no escapes (tracked during the single scan above).
     if !has_escape {
-        let s = as_str(content).to_owned();
-        let mut consumed = end_quote + 1;
-        if consumed < data.len() && data[consumed] == b',' {
-            consumed += 1;
-        }
-        return Ok((s, consumed));
+        return Ok((as_str(content).to_owned(), consumed));
     }
 
     let mut bytes = Vec::with_capacity(content.len());
@@ -157,7 +212,7 @@ pub(super) fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
                     bytes.extend_from_slice(ch.encode_utf8(&mut utf8).as_bytes());
                     i += 4;
                 }
-                other => bytes.push(other),
+                _ => return Err(FonError::Parse("Unknown escape sequence in string".into())),
             }
         } else {
             bytes.push(content[i]);
@@ -168,64 +223,36 @@ pub(super) fn parse_string(data: &[u8]) -> Result<(String, usize), FonError> {
     // control bytes or copies existing bytes, so the result stays valid UTF-8.
     let s = unsafe { String::from_utf8_unchecked(bytes) };
 
-    let mut consumed = end_quote + 1;
-    if consumed < data.len() && data[consumed] == b',' {
-        consumed += 1;
-    }
     Ok((s, consumed))
 }
 
 
 pub(super) fn parse_string_array(data: &[u8]) -> Result<(Vec<String>, usize), FonError> {
-    if data[0] != b'[' {
-        return Err(FonError::Parse("Array must start with '['".into()));
-    }
-
-    let close = find_closing_bracket(data)?;
-    let content = &data[1..close];
+    let (content, consumed): (&[u8], usize) = array_content(data)?;
 
     let mut result: Vec<String> = Vec::new();
-    let mut pos = 0;
+    let mut pos: usize = 0;
     while pos < content.len() {
-        let remaining = &content[pos..];
-        let (s, consumed) = parse_string(remaining)?;
+        let (s, used): (String, usize) = parse_string(&content[pos..])?;
         result.push(s);
-        pos += consumed;
-    }
-
-    let mut total_consumed = close + 1;
-    if total_consumed < data.len() && data[total_consumed] == b',' {
-        total_consumed += 1;
-    }
-
-    Ok((result, total_consumed))
-}
-
-
-pub(super) fn parse_bool_array(data: &[u8]) -> Result<(Vec<bool>, usize), FonError> {
-    if data[0] != b'[' {
-        return Err(FonError::Parse("Array must start with '['".into()));
-    }
-
-    let close = find_closing_bracket(data)?;
-    let content = &data[1..close];
-
-    let mut result: Vec<bool> = Vec::with_capacity(content.len() / 2);
-    let mut pos = 0;
-    while pos < content.len() {
-        let remaining = &content[pos..];
-        let end = find_value_end(remaining);
-        result.push(remaining[0] != b'0');
-        pos += end;
-        if pos < content.len() && content[pos] == b',' {
-            pos += 1;
+        pos += used;
+        if pos < content.len() {
+            pos = after_separator(content, pos)?;
         }
     }
 
-    let mut total_consumed = close + 1;
-    if total_consumed < data.len() && data[total_consumed] == b',' {
-        total_consumed += 1;
-    }
+    Ok((result, consumed))
+}
 
-    Ok((result, total_consumed))
+
+// `content[pos]` must be the comma that separates two items, and another item must
+// follow it. Returns the position of that next item.
+pub(super) fn after_separator(content: &[u8], pos: usize) -> Result<usize, FonError> {
+    if content[pos] != b',' {
+        return Err(FonError::Parse("Expected ',' between values".into()));
+    }
+    if pos + 1 == content.len() {
+        return Err(FonError::Parse("Trailing ','".into()));
+    }
+    Ok(pos + 1)
 }

@@ -19,7 +19,7 @@ pub const TYPE_RAW: u8 = b'r';
 pub const TYPE_OBJECT: u8 = b'o';
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FonValue {
     Byte(u8),
     Short(i16),
@@ -69,10 +69,14 @@ impl FonValue {
 
 
 /// Checks that `key` can be written to the wire format. Keys are not escaped, so a key
-/// containing `=`, `"`, `{`, `}`, `[`, `]`, `\n` or `\r` would produce a line that does
-/// not parse back to the same record. `FonCollection::add_field` applies this check;
-/// the unchecked `add` (used by the parser) does not.
+/// containing `=`, `"`, `{`, `}`, `[`, `]`, `\n` or `\r`, or one that starts with `,`,
+/// would produce a line that does not parse back to the same record.
+/// `FonCollection::add_field` and the parser apply this check; the unchecked `add` does
+/// not.
 pub fn validate_key(key: &str) -> Result<(), FonError> {
+    if key.starts_with(',') {
+        return Err(FonError::InvalidArgument(format!("key '{key}' starts with ','")));
+    }
     match key.bytes().find(|b| matches!(b, b'=' | b'"' | b'{' | b'}' | b'[' | b']' | b'\n' | b'\r')) {
         Some(b) => Err(FonError::InvalidArgument(format!(
             "key '{key}' contains the reserved character {:?}",
@@ -87,7 +91,7 @@ pub fn validate_key(key: &str) -> Result<(), FonError> {
 // far fewer allocations on the parse hot path, and `get` is a short linear scan.
 // Keys are `Arc<str>` so a repeated key (every record shares the same field
 // names) is interned once and reused via cheap clones.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct FonCollection {
     data: Vec<(Arc<str>, FonValue)>,
 }
@@ -99,6 +103,11 @@ impl FonCollection {
     }
 
 
+    /// Append a field without any check: the key is not validated and may repeat one
+    /// that is already present. `get`, `set` and `remove_field` then act on the first
+    /// match only, and the record no longer parses back, because the parser rejects
+    /// reserved characters and duplicate keys. Use `add_field` unless the key is known
+    /// to be new and valid.
     pub fn add(&mut self, key: impl Into<Arc<str>>, value: FonValue) {
         self.data.push((key.into(), value));
     }
@@ -128,7 +137,9 @@ impl FonCollection {
     }
 
 
-    /// Append a new field. Errors if the key already exists — use `set` to overwrite.
+    /// Append a new field. Errors if the key already exists — use `set` to overwrite — or
+    /// fails `validate_key`. The duplicate check scans the existing fields, so building a
+    /// record of `n` fields this way costs `O(n²)`.
     pub fn add_field(&mut self, key: impl Into<Arc<str>>, value: FonValue) -> Result<(), FonError> {
         let key: Arc<str> = key.into();
         validate_key(&key)?;
@@ -171,6 +182,7 @@ impl FonCollection {
 // A record cell in a mutable store. `value == None` is a tombstone: a removed record
 // or an unfilled gap. The record is boxed so growing the slot vector never moves a live
 // record — borrowed pointers into a live record survive any add/remove.
+#[derive(Debug)]
 pub struct Slot {
     record_gen: u32,
     tree_gen: u32,
@@ -190,6 +202,7 @@ impl Slot {
 // counters used to validate borrowed views. `Sparse` holds the same generation-bearing
 // slots for arbitrary / very large ids. `live` is the number of occupied slots so
 // `len()` stays O(1) despite tombstones.
+#[derive(Debug)]
 enum FonDumpStore {
     Dense(Vec<FonCollection>),
     Slab { slots: Vec<Slot>, live: usize },
@@ -204,9 +217,27 @@ impl Default for FonDumpStore {
 }
 
 
-#[derive(Default)]
+/// Records keyed by id.
+///
+/// A dump parsed from text keeps its records inline and has no per-record state. In
+/// that state any `add` may move the records, and the first `remove`, `replace`,
+/// `bump_tree_gen` or `ensure_mutable` moves every record into its own allocation, so
+/// references and pointers taken earlier are invalid afterwards. From then on a live
+/// record never moves.
+///
+/// A removed id leaves a tombstone that is kept until the dump is dropped, so memory
+/// and iteration cost follow the number of ids ever used, not `len()`. Saving and
+/// loading drops the tombstones and renumbers the records from 0.
+#[derive(Debug, Default)]
 pub struct FonDump {
     store: FonDumpStore,
+}
+
+
+// Position of `id` in a Vec-backed store. `None` when the id does not fit in `usize`
+// (32-bit targets), so a huge id is absent instead of aliasing a small one.
+fn index(id: u64) -> Option<usize> {
+    usize::try_from(id).ok()
 }
 
 
@@ -232,9 +263,11 @@ impl FonDump {
     }
 
 
+    /// Store `collection` under `id`. A record that is already live under that id is
+    /// replaced, exactly as by `replace`, and its `record_gen` is bumped.
     pub fn add(&mut self, id: u64, collection: FonCollection) {
         match &mut self.store {
-            FonDumpStore::Dense(v) if id as usize == v.len() => {
+            FonDumpStore::Dense(v) if index(id) == Some(v.len()) => {
                 v.push(collection);
             }
             FonDumpStore::Dense(_) => {
@@ -252,12 +285,12 @@ impl FonDump {
                 sparse_insert(&mut map, &mut live, id, collection);
                 self.store = FonDumpStore::Sparse { map, live };
             }
-            FonDumpStore::Slab { slots, live } => {
-                let idx = id as usize;
-                if idx == slots.len() {
+            FonDumpStore::Slab { slots, live } => match index(id) {
+                Some(idx) if idx == slots.len() => {
                     slots.push(Slot::occupied(collection));
                     *live += 1;
-                } else if idx < slots.len() {
+                }
+                Some(idx) if idx < slots.len() => {
                     let slot = &mut slots[idx];
                     if slot.value.is_none() {
                         // Tombstone refill: no need to bump `record_gen` here, `remove`
@@ -268,7 +301,8 @@ impl FonDump {
                         slot.record_gen = slot.record_gen.wrapping_add(1);
                     }
                     slot.value = Some(Box::new(collection));
-                } else {
+                }
+                _ => {
                     // Gap beyond the end: promote to sparse rather than pad unboundedly.
                     let old = std::mem::take(&mut self.store);
                     if let FonDumpStore::Slab { slots, live } = old {
@@ -279,7 +313,7 @@ impl FonDump {
                         self.store = FonDumpStore::Sparse { map, live };
                     }
                 }
-            }
+            },
             FonDumpStore::Sparse { map, live } => {
                 sparse_insert(map, live, id, collection);
             }
@@ -289,9 +323,9 @@ impl FonDump {
 
     pub fn get(&self, id: u64) -> Option<&FonCollection> {
         match &self.store {
-            FonDumpStore::Dense(v) => v.get(id as usize),
+            FonDumpStore::Dense(v) => index(id).and_then(|i| v.get(i)),
             FonDumpStore::Slab { slots, .. } => {
-                slots.get(id as usize).and_then(|s| s.value.as_deref())
+                index(id).and_then(|i| slots.get(i)).and_then(|s| s.value.as_deref())
             }
             FonDumpStore::Sparse { map, .. } => {
                 map.get(&id).and_then(|s| s.value.as_deref())
@@ -302,9 +336,9 @@ impl FonDump {
 
     pub fn get_mut(&mut self, id: u64) -> Option<&mut FonCollection> {
         match &mut self.store {
-            FonDumpStore::Dense(v) => v.get_mut(id as usize),
+            FonDumpStore::Dense(v) => index(id).and_then(|i| v.get_mut(i)),
             FonDumpStore::Slab { slots, .. } => {
-                slots.get_mut(id as usize).and_then(|s| s.value.as_deref_mut())
+                index(id).and_then(|i| slots.get_mut(i)).and_then(|s| s.value.as_deref_mut())
             }
             FonDumpStore::Sparse { map, .. } => {
                 map.get_mut(&id).and_then(|s| s.value.as_deref_mut())
@@ -362,7 +396,7 @@ impl FonDump {
         self.ensure_mutable();
         match &mut self.store {
             FonDumpStore::Slab { slots, live } => {
-                match slots.get_mut(id as usize) {
+                match index(id).and_then(|i| slots.get_mut(i)) {
                     Some(slot) if slot.value.is_some() => {
                         slot.value = None;
                         slot.record_gen = slot.record_gen.wrapping_add(1);
@@ -410,7 +444,7 @@ impl FonDump {
         }
         self.ensure_mutable();
         let slot = match &mut self.store {
-            FonDumpStore::Slab { slots, .. } => slots.get_mut(id as usize),
+            FonDumpStore::Slab { slots, .. } => index(id).and_then(|i| slots.get_mut(i)),
             FonDumpStore::Sparse { map, .. } => map.get_mut(&id),
             FonDumpStore::Dense(_) => unreachable!("ensure_mutable promoted away Dense"),
         };
@@ -425,15 +459,21 @@ impl FonDump {
     }
 
 
-    /// Generation of the record at `id`, bumped by `remove`/`replace`. `None` if there is
-    /// no live record. A record view is valid while this matches the value it captured.
+    /// Generation of the record at `id`, bumped by `remove`, `replace` and an `add` that
+    /// overwrites a live record. `None` if there is no live record. A record view is valid
+    /// while this matches the value it captured.
+    ///
+    /// A dump that still keeps its records inline (see the type documentation) reports 0
+    /// for every record and does not count the moves described there, so a caller that
+    /// holds pointers must call `ensure_mutable` first or track its own changes.
+    /// The counter is 32 bits wide and wraps around.
     pub fn record_gen(&self, id: u64) -> Option<u32> {
         match &self.store {
             FonDumpStore::Dense(v) => {
-                if (id as usize) < v.len() { Some(0) } else { None }
+                index(id).filter(|i| *i < v.len()).map(|_| 0)
             }
             FonDumpStore::Slab { slots, .. } => {
-                slots.get(id as usize).filter(|s| s.value.is_some()).map(|s| s.record_gen)
+                index(id).and_then(|i| slots.get(i)).filter(|s| s.value.is_some()).map(|s| s.record_gen)
             }
             FonDumpStore::Sparse { map, .. } => {
                 map.get(&id).filter(|s| s.value.is_some()).map(|s| s.record_gen)
@@ -442,16 +482,18 @@ impl FonDump {
     }
 
 
-    /// Generation of the record's field tree at `id`, bumped by any field-level mutation
-    /// (`bump_tree_gen`). `None` if there is no live record. A nested view is valid while
-    /// both this and `record_gen` match the values it captured.
+    /// Generation of the record's field tree at `id`. It changes only when
+    /// `bump_tree_gen` is called: editing a record through `get_mut` does not bump it, so
+    /// a caller that hands out pointers into a record must call `bump_tree_gen` after
+    /// every field-level change. `None` if there is no live record. A nested view is
+    /// valid while both this and `record_gen` match the values it captured.
     pub fn tree_gen(&self, id: u64) -> Option<u32> {
         match &self.store {
             FonDumpStore::Dense(v) => {
-                if (id as usize) < v.len() { Some(0) } else { None }
+                index(id).filter(|i| *i < v.len()).map(|_| 0)
             }
             FonDumpStore::Slab { slots, .. } => {
-                slots.get(id as usize).filter(|s| s.value.is_some()).map(|s| s.tree_gen)
+                index(id).and_then(|i| slots.get(i)).filter(|s| s.value.is_some()).map(|s| s.tree_gen)
             }
             FonDumpStore::Sparse { map, .. } => {
                 map.get(&id).filter(|s| s.value.is_some()).map(|s| s.tree_gen)
@@ -470,7 +512,7 @@ impl FonDump {
         }
         self.ensure_mutable();
         let slot = match &mut self.store {
-            FonDumpStore::Slab { slots, .. } => slots.get_mut(id as usize),
+            FonDumpStore::Slab { slots, .. } => index(id).and_then(|i| slots.get_mut(i)),
             FonDumpStore::Sparse { map, .. } => map.get_mut(&id),
             FonDumpStore::Dense(_) => unreachable!("ensure_mutable promoted away Dense"),
         };
